@@ -62,7 +62,10 @@ const server = createServer(async (req, res) => {
   createReadStream(file).pipe(res);
 });
 
-server.listen(config.port, '0.0.0.0', () => log('info', 'RailMind Agent OS started', { ...describeConfig(config), url: `http://localhost:${server.address().port}`, port: server.address().port }));
+// On Vercel the platform binds the default-exported server; listening here as well would collide with it.
+if (!process.env.VERCEL) {
+  server.listen(config.port, '0.0.0.0', () => log('info', 'RailMind Agent OS started', { ...describeConfig(config), url: `http://localhost:${server.address().port}`, port: server.address().port }));
+}
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
@@ -71,3 +74,5 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
     setTimeout(() => process.exit(0), 3000).unref();
   });
 }
+
+export default server;
