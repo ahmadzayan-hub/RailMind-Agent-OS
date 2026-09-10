@@ -1,8 +1,9 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run typecheck",
   "functions": {
     "server.mjs": {
-      "includeFiles": "{index.html,web/**,src/**}"
+      "includeFiles": "{index.html,web/**}"
     }
   }
 }
