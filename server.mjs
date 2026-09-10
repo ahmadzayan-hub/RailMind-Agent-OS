@@ -72,7 +72,7 @@ const server = createServer(async (req, res) => {
   createReadStream(file).pipe(res);
 });
 
-// On Vercel the platform binds the default-exported server; listening here as well would collide with it.
+// On Vercel the platform invokes the default-exported handler per request; nothing listens there.
 if (!process.env.VERCEL) {
   server.listen(config.port, '0.0.0.0', () => log('info', 'RailMind Agent OS started', { ...describeConfig(config), url: `http://localhost:${server.address().port}`, port: server.address().port }));
 }
@@ -85,4 +85,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
   });
 }
 
-export default server;
+/** Vercel entrypoint shape: a (req, res) handler, dispatched into the same server used locally. */
+export default function handler(req, res) {
+  server.emit('request', req, res);
+}
