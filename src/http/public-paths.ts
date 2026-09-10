@@ -44,7 +44,7 @@ const ROOT_FILES: Readonly<Record<string, string>> = {
 const PUBLIC_DIRECTORIES: readonly string[] = ['web/'];
 
 /** Files under public directories that embed inline scripts (CSP hash needed). */
-const INLINE_SCRIPT_FILES: ReadonlySet<string> = new Set(['web/portfolio.html']);
+const INLINE_SCRIPT_FILES: ReadonlySet<string> = new Set<string>();
 
 function reject(status: 400 | 404, reason: string): PublicRejection {
   return { kind: 'reject', status, reason };

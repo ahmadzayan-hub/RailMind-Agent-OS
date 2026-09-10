@@ -45,7 +45,9 @@ After each phase: typecheck, targeted tests, full `npm run verify`. At the end: 
 | 6 | Done | `src/reporting/approval.ts`, `evidence-version.ts`, automatic supersession in the API |
 | 7 | Done | `src/ledger/contracts.ts`, `PgDecisionLedger`, `/api/ledger` |
 | 8 | Done | `src/kpi/registry.ts`, governed demo definitions, readiness per definition |
-| 9 to 15 | Not started | Paused for independent review, as agreed |
+| 9 | Done | `src/forecast/budget-forecast.ts` v2, `tests/budget-forecast.test.ts` (completed-record exclusion regression, confidence, funding gap, backtest, drift) |
+| 10 | Done | `src/portfolio/*`, `/api/portfolio`, `web/portfolio.js` + synthetic pack, classification guard, retired fingerprints blocked |
+| 11 to 15 | Not started | Paused for independent review, as agreed |
 | 16 | Partly | CI active; branch protection documented in `BRANCH_GOVERNANCE.md`, to be configured on GitHub |
 | 17 | Done for 0 to 8 | README, SECURITY, DEPLOYMENT, status, OpenAPI, CLAUDE.md updated; full Apache-2.0 licence text |
 | 18 | Partly | Security bypass, RBAC denial, cross-scope, missing and stale evidence, duplicates, conflicts, formula version changes, approval invalidation, Maximo 401/403/500, source unavailable, database unavailable (live test skipped without DATABASE_URL) covered; LLM unavailable and forecast tests pending |

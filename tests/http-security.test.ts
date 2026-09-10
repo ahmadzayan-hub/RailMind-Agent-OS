@@ -30,9 +30,9 @@ test('public path resolver serves only the interface files', () => {
   ok('/web/app.js', 'web/app.js');
   ok('/web/styles.css', 'web/styles.css');
   ok('/web/data/demo-pack.js', 'web/data/demo-pack.js');
-  const portfolio = resolvePublicPath('/web/portfolio.html');
-  assert.equal(portfolio.kind, 'file');
-  if (portfolio.kind === 'file') assert.equal(portfolio.inlineScript, true);
+  ok('/web/portfolio.html', 'web/portfolio.html');
+  ok('/web/portfolio.js', 'web/portfolio.js');
+  ok('/web/data/portfolio-pack.js', 'web/data/portfolio-pack.js');
 });
 
 test('security headers include CSP, nosniff, referrer, frame and permissions policies', async () => {
@@ -82,7 +82,8 @@ test('live server: repository files and traversal variants are unreachable; inte
     assert.ok(index.headers.get('permissions-policy'));
     const portfolio = await fetch(`${server.base}/web/portfolio.html`);
     assert.equal(portfolio.status, 200);
-    assert.match(portfolio.headers.get('content-security-policy') ?? '', /'sha256-[A-Za-z0-9+/=]+'/);
+    assert.match(portfolio.headers.get('content-security-policy') ?? '', /script-src 'self';/);
+    assert.doesNotMatch(await portfolio.text(), /<script>(?!\s*<\/script>)/, 'portfolio page must not embed an inline script');
     const head = await fetch(`${server.base}/web/app.js`, { method: 'HEAD' });
     assert.equal(head.status, 200);
     assert.equal((await head.text()).length, 0);

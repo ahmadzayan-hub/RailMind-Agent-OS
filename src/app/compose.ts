@@ -19,6 +19,8 @@ import type { SqlDatabase } from '../persistence/sql.ts';
 import { InMemoryReportStore, type ReportStore } from '../reporting/store.ts';
 import type { ApiDependencies } from '../api/router.ts';
 import { ControlTowerService } from './control-tower-service.ts';
+import { PortfolioService } from '../portfolio/service.ts';
+import { createSyntheticPortfolioProvider } from '../portfolio/synthetic.ts';
 import { assertConsistentMode, type DataProviders } from '../providers/contracts.ts';
 import { createContractRepositoryProvider, createMaximoReadProvider } from '../providers/production.ts';
 import { createSyntheticProviders } from '../providers/synthetic.ts';
@@ -109,9 +111,11 @@ export async function composeApplication(config: AppConfig, overrides: ComposeOv
   });
 
   const controlTower = new ControlTowerService(providers, reportStore, DEMO_REPORT, overrides.now);
+  /* Portfolio: synthetic provider in demo mode; a private provider would be injected here for internal builds and is refused in public builds by classification. */
+  const portfolio = new PortfolioService(createSyntheticPortfolioProvider(), { now: overrides.now, publicBuild: config.mode === 'demo' });
 
   return {
-    api: { reportStore, auditLog, memoryStore, seedReport: DEMO_REPORT, persistence, runtime, classification: config.classification, now: overrides.now, tokenDirectory: createTokenDirectory(config.usersJson), healthCheck: overrides.database ? async () => { await overrides.database?.query('SELECT 1'); } : undefined, controlTower, scope: DEMO_SCOPE, mode: providers.mode, ledger },
+    api: { reportStore, auditLog, memoryStore, seedReport: DEMO_REPORT, persistence, runtime, classification: config.classification, now: overrides.now, tokenDirectory: createTokenDirectory(config.usersJson), healthCheck: overrides.database ? async () => { await overrides.database?.query('SELECT 1'); } : undefined, controlTower, scope: DEMO_SCOPE, mode: providers.mode, ledger, portfolio },
     runtime,
     providers,
     controlTower,

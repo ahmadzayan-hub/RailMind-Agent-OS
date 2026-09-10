@@ -229,3 +229,24 @@ test('API executes a governed agent run through the composition root and audits 
     assert.equal(audit.chain.valid, true);
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await app.close(); }
 });
+
+test('API serves the synthetic portfolio DTO to scoped principals only', async () => {
+  const { composeApplication } = await import('../src/app/compose.ts');
+  const { loadConfig } = await import('../src/config.ts');
+  const app = await composeApplication(loadConfig({}), { now: () => '2026-09-09T12:00:00Z' });
+  const handler = createApiHandler(app.api);
+  const server = createServer(async (req, res) => { if (await handler(req, res)) return; res.writeHead(404); res.end(); });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const ok = await fetch(`${base}/api/portfolio`, { headers: { Authorization: 'Bearer demo-finance' } });
+    assert.equal(ok.status, 200);
+    const dto = await ok.json() as { classification: string; cells: unknown[]; forecastMeta: { confidence: string } };
+    assert.equal(dto.classification, 'PUBLIC_SYNTHETIC');
+    assert.ok(dto.cells.length > 0);
+    const outOfScope = await fetch(`${base}/api/portfolio`, { headers: { Authorization: 'Bearer demo-other-contract' } });
+    assert.equal(outOfScope.status, 403);
+    const anonymous = await fetch(`${base}/api/portfolio`);
+    assert.equal(anonymous.status, 401);
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await app.close(); }
+});

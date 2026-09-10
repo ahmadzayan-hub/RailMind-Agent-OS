@@ -77,15 +77,16 @@ export class StaticTokenDirectory implements TokenDirectory {
 
 /** Synthetic-preview identities. Tokens are public by design and only valid in demo mode. */
 const DEMO_CONTRACT: Scope = { type: 'contract', id: 'DEMO-CONTRACT' };
+const DEMO_PORTFOLIO: Scope = { type: 'portfolio', id: 'SYNTHETIC' };
 const SYSTEM: Scope = { type: 'system' };
 
 export const DEMO_IDENTITIES: readonly { principal: Principal; token: string }[] = [
   { principal: { principalId: 'demo.viewer', displayName: 'Demo Viewer', role: 'viewer', scopes: [SYSTEM] }, token: 'demo-viewer' },
-  { principal: { principalId: 'demo.engineer', displayName: 'Demo Maintenance Engineer', role: 'maintenance_engineer', scopes: [DEMO_CONTRACT, { type: 'line', id: 'Red Line' }] }, token: 'demo-engineer' },
-  { principal: { principalId: 'demo.reliability', displayName: 'Demo Reliability Engineer', role: 'reliability_engineer', scopes: [DEMO_CONTRACT] }, token: 'demo-reliability' },
-  { principal: { principalId: 'demo.contract', displayName: 'Demo Contract Manager', role: 'contract_manager', scopes: [DEMO_CONTRACT] }, token: 'demo-contract' },
-  { principal: { principalId: 'demo.finance', displayName: 'Demo Finance Reviewer', role: 'finance_reviewer', scopes: [DEMO_CONTRACT] }, token: 'demo-finance' },
-  { principal: { principalId: 'demo.approver', displayName: 'Demo Approver', role: 'approver', scopes: [DEMO_CONTRACT] }, token: 'demo-approver' },
+  { principal: { principalId: 'demo.engineer', displayName: 'Demo Maintenance Engineer', role: 'maintenance_engineer', scopes: [DEMO_CONTRACT, DEMO_PORTFOLIO, { type: 'line', id: 'Red Line' }] }, token: 'demo-engineer' },
+  { principal: { principalId: 'demo.reliability', displayName: 'Demo Reliability Engineer', role: 'reliability_engineer', scopes: [DEMO_CONTRACT, DEMO_PORTFOLIO] }, token: 'demo-reliability' },
+  { principal: { principalId: 'demo.contract', displayName: 'Demo Contract Manager', role: 'contract_manager', scopes: [DEMO_CONTRACT, DEMO_PORTFOLIO] }, token: 'demo-contract' },
+  { principal: { principalId: 'demo.finance', displayName: 'Demo Finance Reviewer', role: 'finance_reviewer', scopes: [DEMO_CONTRACT, DEMO_PORTFOLIO] }, token: 'demo-finance' },
+  { principal: { principalId: 'demo.approver', displayName: 'Demo Approver', role: 'approver', scopes: [DEMO_CONTRACT, DEMO_PORTFOLIO] }, token: 'demo-approver' },
   { principal: { principalId: 'demo.admin', displayName: 'Demo Administrator', role: 'administrator', scopes: [SYSTEM] }, token: 'demo-admin' },
   { principal: { principalId: 'demo.other', displayName: 'Demo Engineer (other contract)', role: 'maintenance_engineer', scopes: [{ type: 'contract', id: 'OTHER-CONTRACT' }] }, token: 'demo-other-contract' },
 ];

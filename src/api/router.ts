@@ -4,6 +4,7 @@ import { createExecutionPlan } from '../agent-os/kernel.ts';
 import type { MemoryStore } from '../agent-os/memory.ts';
 import type { AgentRuntime } from '../agent-os/orchestrator.ts';
 import type { ControlTowerService, TowerScope } from '../app/control-tower-service.ts';
+import type { PortfolioService } from '../portfolio/service.ts';
 import { TRANSITION_PERMISSION, hasPermission, inScope, permissionsOf, runPermissionFor, type Permission, type Principal, type Scope } from '../auth/principal.ts';
 import type { TokenDirectory } from '../auth/token-directory.ts';
 import { securityHeaders } from '../http/security-headers.ts';
@@ -43,6 +44,8 @@ export interface ApiDependencies {
   ledger?: DecisionLedger;
   /** Control Tower application service and default scope. */
   controlTower?: ControlTowerService;
+  /** Portfolio application service (synthetic in public builds). */
+  portfolio?: PortfolioService;
   scope?: TowerScope;
   mode?: 'synthetic' | 'production';
 }
@@ -300,6 +303,14 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
         status: result.ok ? 200 : 409,
         body: { ok: result.ok, blockers: result.blockers, audit, report: result.report, readiness: reportReadiness(result.report, evidenceVersion), evidenceVersion },
       };
+    }
+    if (method === 'GET' && path === '/api/portfolio') {
+      await require(principal, 'report.read', 'portfolio', { type: 'portfolio', id: 'SYNTHETIC' });
+      if (!deps.portfolio) throw new HttpError(503, 'Portfolio service is not configured.');
+      const asOf = query.get('asOf') ?? now().slice(0, 10);
+      const horizon = query.get('horizon') ?? `${asOf.slice(0, 4)}-12-31`;
+      if (Number.isNaN(Date.parse(asOf)) || Number.isNaN(Date.parse(horizon))) throw new HttpError(400, 'asOf and horizon must be ISO dates.');
+      return { status: 200, body: await deps.portfolio.build(asOf, horizon) };
     }
     if (method === 'GET' && path === '/api/ledger') {
       await require(principal, 'ledger.read', 'ledger', contractScope());

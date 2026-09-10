@@ -41,6 +41,7 @@ export * from './llm/openai-compatible.ts';
 export * from './llm/policy.ts';
 export * from './llm/report-narrative.ts';
 export * from './persistence/pg-database.ts';
+export * from './portfolio/index.ts';
 export * from './persistence/postgres.ts';
 export * from './persistence/sql.ts';
 export * from './reporting/approval.ts';

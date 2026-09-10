@@ -43,7 +43,8 @@ Status date: 2026-09-09
 | Finance production mapping | Port exists; source mapping pending | Requires approved Maximo finance fields/object structure |
 | Enterprise identity (SSO) | P1 | Token directory is the interface; bind to OIDC or Keycloak before live data |
 | Contract-repository and condition-monitoring adapters | P1 | Production mode cannot start until they exist (by design) |
-| Forecast governance and portfolio API | P1 | Calibration defect recorded in `RECONCILIATION_2026-09-09.md`; embedded portfolio cells to be replaced by a synthetic portfolio API |
+| Forecast governance | Implemented | `src/forecast/budget-forecast.ts` v2: completed-record exclusion, confidence labels, funding gap, backtest, drift monitor, recalibration metadata |
+| Portfolio API and public governance | Implemented | `src/portfolio/*`, `GET /api/portfolio`, synthetic seeded provider, classification guard, retired snapshot fingerprints blocked by `check:portfolio` |
 
 ## Release gate
 

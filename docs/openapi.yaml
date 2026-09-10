@@ -52,6 +52,15 @@ paths:
       responses:
         '200': { description: DTO }
         '403': { description: Outside the principal's scope }
+  /api/portfolio:
+    get:
+      summary: Synthetic portfolio DTO with governed forecast and funding-gap exceptions
+      parameters:
+        - { in: query, name: asOf, schema: { type: string, format: date } }
+        - { in: query, name: horizon, schema: { type: string, format: date } }
+      responses:
+        '200': { description: Portfolio DTO }
+        '403': { description: Outside the principal's portfolio scope }
   /api/ledger:
     get:
       summary: Decision ledger records
