@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { buildDemoPack, renderDemoPackModule } from '../src/web/demo-pack.ts';
+import { buildGisPack, renderGisPackModule } from '../src/web/gis-pack.ts';
 
 const target = new URL('../web/data/demo-pack.js', import.meta.url);
 const committed = readFileSync(target, 'utf8');
@@ -23,4 +24,16 @@ for (const exception of pack.exceptions) {
   assert.ok(exception.kind === 'readiness' || pack.kpis.some((kpi) => kpi.id === exception.kpiId), `Exception ${exception.id} must map to a KPI.`);
   assert.ok(exception.evidence.length > 0, `Exception ${exception.id} must carry evidence.`);
 }
-console.log('PASS: web data pack matches the Control Tower service.');
+const gisTarget = new URL('../web/data/gis-pack.js', import.meta.url);
+const gis = await buildGisPack();
+assert.equal(readFileSync(gisTarget, 'utf8'), renderGisPackModule(gis), 'web/data/gis-pack.js has drifted from the GIS service. Run `npm run build:web-data` and commit the result.');
+assert.equal(gis.provenance.positionsAreCoordinates, false);
+assert.equal(gis.provenance.schematic.kind, 'synthetic_schematic');
+assert.equal(gis.provenance.reportId, pack.report.reportId);
+for (const node of gis.nodes) {
+  assert.ok(['stable', 'watch', 'critical'].includes(node.status), `GIS node ${node.nodeId} must carry a status.`);
+  if (node.kind === 'asset') assert.ok(pack.assets.some((a) => a.assetId === node.refs.assetIds[0]), `GIS asset node ${node.nodeId} must point at a pack asset.`);
+  if (node.kind === 'work-order') assert.ok(pack.workOrders.some((w) => w.workOrderId === node.refs.workOrderId), `GIS work-order node ${node.nodeId} must point at a pack work order.`);
+  if (node.kind === 'train') assert.equal(node.simulated, true, 'train markers are simulated');
+}
+console.log('PASS: web data packs match the Control Tower and GIS services.');

@@ -53,3 +53,7 @@ export * from './reporting/contracts.ts';
 export * from './reporting/generator.ts';
 export * from './reporting/store.ts';
 export * from './reporting/registry.ts';
+export * from './gis/contracts.ts';
+export * from './gis/demo-schematic.ts';
+export * from './gis/service.ts';
+export * from './web/gis-pack.ts';

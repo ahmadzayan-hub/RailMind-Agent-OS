@@ -15,6 +15,8 @@ import { approvalInvalidated, reportReadiness, transitionReport, type ReportTran
 import type { ReportPackage } from '../reporting/contracts.ts';
 import type { ReportStore } from '../reporting/store.ts';
 import { createReportRegistry, scopeOf, type ReportRegistration, type ReportRegistry } from '../reporting/registry.ts';
+import type { GisReadPort } from '../gis/contracts.ts';
+import { buildGisView } from '../gis/service.ts';
 
 /**
  * Local decision API. It mutates RailMind-owned state only (report status,
@@ -51,6 +53,8 @@ export interface ApiDependencies {
   mode?: 'synthetic' | 'production';
   /** Registered report packages (multi-report, multi-contract). Defaults to the seed report alone. */
   reports?: ReportRegistry;
+  /** GIS schematic port (bounded GIS domain). Absent in deployments without a schematic adapter. */
+  gis?: GisReadPort;
 }
 
 /** Structural subset of Node's IncomingMessage/ServerResponse so src/ stays runtime-neutral. */
@@ -323,6 +327,17 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       const asOf = query.get('asOf') ?? undefined;
       if (asOf !== undefined && Number.isNaN(Date.parse(asOf))) throw new HttpError(400, 'asOf must be an ISO timestamp.');
       return { status: 200, body: await deps.controlTower.build(towerScope(registration), asOf, registration.seed) };
+    }
+    if (method === 'GET' && path === '/api/gis') {
+      const registration = resolveReport(query.get('reportId'));
+      await require(principal, 'report.read', 'gis', contractScope(registration));
+      if (!deps.gis) throw new HttpError(503, 'No GIS schematic adapter is configured in this deployment.');
+      if (!deps.controlTower) throw new HttpError(503, 'Control Tower service is not configured.');
+      const lineId = query.get('lineId');
+      const line = lineId ? await deps.gis.getLine(lineId) : (await deps.gis.listLines())[0] ?? null;
+      if (!line) throw new HttpError(404, lineId ? `Schematic line ${lineId} not found.` : 'No schematic line is available.');
+      const tower = await deps.controlTower.build(towerScope(registration), undefined, registration.seed);
+      return { status: 200, body: buildGisView(line, tower, now()) };
     }
     if (method === 'GET' && path === '/api/audit') {
       await require(principal, 'audit.read', 'audit');

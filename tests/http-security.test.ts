@@ -30,6 +30,7 @@ test('public path resolver serves only the interface files', () => {
   ok('/web/app.js', 'web/app.js');
   ok('/web/styles.css', 'web/styles.css');
   ok('/web/data/demo-pack.js', 'web/data/demo-pack.js');
+  ok('/web/data/gis-pack.js', 'web/data/gis-pack.js');
   ok('/web/portfolio.html', 'web/portfolio.html');
   ok('/web/portfolio.js', 'web/portfolio.js');
   ok('/web/data/portfolio-pack.js', 'web/data/portfolio-pack.js');
