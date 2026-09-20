@@ -16,10 +16,11 @@ import { MaximoRestClient } from '../connectors/maximo/client.ts';
 import { MockMaximoReadPort } from '../connectors/maximo/mock.ts';
 import type { MaximoReadPort } from '../connectors/maximo/port.ts';
 import type { AppConfig } from '../config.ts';
-import { DEMO_ASSETS, DEMO_CONDITION_PROFILES, DEMO_CONTRACT_KPI_SET, DEMO_INVOICES, DEMO_PM_RECORDS, DEMO_REPORT, DEMO_SCOPE, DEMO_WORK_ORDERS } from '../demo.ts';
+import { DEMO_DATASET, DEMO_REPORT, DEMO_REPORT_REGISTRATIONS, DEMO_SCOPE } from '../demo.ts';
 import { OpenAiCompatibleGateway } from '../llm/openai-compatible.ts';
 import type { SqlDatabase } from '../persistence/sql.ts';
 import { InMemoryReportStore, type ReportStore } from '../reporting/store.ts';
+import { createReportRegistry } from '../reporting/registry.ts';
 import type { ApiDependencies } from '../api/router.ts';
 import { ControlTowerService, type TowerScope } from './control-tower-service.ts';
 import type { ReportPackage } from '../reporting/contracts.ts';
@@ -125,10 +126,10 @@ export async function composeApplication(config: AppConfig, overrides: ComposeOv
     /* The seed package is built through the same governed pipeline; the API refreshes its KPIs on every read. */
     seedReport = buildReportPackage({ reportId: `${scope.contractId}-MONTHLY-${scope.periodEnd.slice(0, 7)}`, cadence: 'monthly', contractId: scope.contractId, periodStart: scope.periodStart, periodEnd: scope.periodEnd, kpis: [] });
   } else {
-    maximo = overrides.maximo ?? new MockMaximoReadPort({ assets: DEMO_ASSETS, workOrders: DEMO_WORK_ORDERS, preventiveMaintenance: DEMO_PM_RECORDS, invoices: DEMO_INVOICES });
-    contract = new InMemoryContractReadPort([DEMO_CONTRACT_KPI_SET]);
-    condition = new InMemoryConditionReadPort(DEMO_CONDITION_PROFILES);
-    providers = createSyntheticProviders({ assets: DEMO_ASSETS, workOrders: DEMO_WORK_ORDERS, preventiveMaintenance: DEMO_PM_RECORDS, conditionProfiles: DEMO_CONDITION_PROFILES, kpiSets: [DEMO_CONTRACT_KPI_SET], invoices: DEMO_INVOICES });
+    maximo = overrides.maximo ?? new MockMaximoReadPort({ assets: DEMO_DATASET.assets, workOrders: DEMO_DATASET.workOrders, preventiveMaintenance: DEMO_DATASET.preventiveMaintenance, invoices: DEMO_DATASET.invoices });
+    contract = new InMemoryContractReadPort(DEMO_DATASET.kpiSets);
+    condition = new InMemoryConditionReadPort(DEMO_DATASET.conditionProfiles);
+    providers = createSyntheticProviders(DEMO_DATASET);
     scope = config.scope ? { ...config.scope, priorBreachesByKpi: DEMO_SCOPE.priorBreachesByKpi } : DEMO_SCOPE;
     seedReport = DEMO_REPORT;
   }
@@ -153,11 +154,13 @@ export async function composeApplication(config: AppConfig, overrides: ComposeOv
 
   const controlTower = new ControlTowerService(providers, reportStore, seedReport, overrides.now);
   if (config.mode === 'production') seedReport = await controlTower.seedPackage(scope);
+  /* Registered packages: the configured scope only in production; the demo serves two contracts and two cadences. */
+  const reports = config.mode === 'production' ? createReportRegistry([{ seed: seedReport }]) : createReportRegistry(DEMO_REPORT_REGISTRATIONS);
   /* Portfolio: synthetic provider in demo mode; a private provider would be injected here for internal builds and is refused in public builds by classification. */
   const portfolio = new PortfolioService(createSyntheticPortfolioProvider(), { now: overrides.now, publicBuild: config.mode === 'demo' });
 
   return {
-    api: { reportStore, auditLog, memoryStore, seedReport, persistence, runtime, classification: config.classification, now: overrides.now, tokenDirectory: createTokenDirectory(config.usersJson), healthCheck: overrides.database ? async () => { await overrides.database?.query('SELECT 1'); } : undefined, controlTower, scope, mode: providers.mode, ledger, portfolio },
+    api: { reportStore, auditLog, memoryStore, seedReport, persistence, runtime, classification: config.classification, now: overrides.now, tokenDirectory: createTokenDirectory(config.usersJson), healthCheck: overrides.database ? async () => { await overrides.database?.query('SELECT 1'); } : undefined, controlTower, scope, mode: providers.mode, ledger, portfolio, reports },
     runtime,
     providers,
     controlTower,

@@ -4,7 +4,9 @@ import type { ContractKpiSet } from './connectors/contract/port.ts';
 import type { MaximoAssetRecord, MaximoInvoiceRecord, MaximoPmRecord, MaximoWorkOrderRecord } from './connectors/maximo/port.ts';
 import { DEMO_KPI_DEFINITIONS } from './kpi/demo-definitions.ts';
 import { computeKpiObservation } from './kpi/engine.ts';
+import type { SyntheticDataset } from './providers/synthetic.ts';
 import { buildReportPackage, deterministicExecutiveSummary } from './reporting/generator.ts';
+import type { ReportRegistration } from './reporting/registry.ts';
 
 const periodStart = '2026-08-01T00:00:00Z';
 const periodEnd = '2026-08-31T23:59:59Z';
@@ -78,13 +80,84 @@ export const DEMO_CONDITION_PROFILES: readonly AssetConditionProfile[] = [
 /** Demo scope used by the composition root when a task carries no explicit scope. */
 export const DEMO_SCOPE = { contractId: 'DEMO-CONTRACT', periodStart, periodEnd, priorBreachesByKpi: { mttr: 2 } } as const;
 
+const plannedServiceMinutesPerPeriod = (start: string, end: string): number => Math.max(1, Math.round((Date.parse(end) - Date.parse(start)) / 60_000));
+
 /** DEMO ONLY approved-definition set served through the contract port. */
 export const DEMO_CONTRACT_KPI_SET: ContractKpiSet = {
   contractId: 'DEMO-CONTRACT',
   definitionVersion: 'demo-v1',
   approvalStatus: 'demo_only',
   definitions: DEMO_KPI_DEFINITIONS,
-  plannedServiceMinutesPerPeriod: (start, end) => Math.max(1, Math.round((Date.parse(end) - Date.parse(start)) / 60_000)),
+  plannedServiceMinutesPerPeriod,
   assetIds: DEMO_ASSETS.map((asset) => asset.assetId),
   evidence: { sourceSystem: 'contract_repository', entityType: 'kpi-definition-set', entityId: 'DEMO-CONTRACT/demo-v1', observedAt: periodStart },
 };
+
+/*
+ * Multi-report and multi-contract demo. A second package for the same
+ * contract (quarterly, Q3 2026, computed from the same synthetic orders) and
+ * a second synthetic contract with its own assets, orders and definition
+ * set. The second contract exists so scope enforcement can be demonstrated:
+ * a principal scoped to one contract never sees the other.
+ */
+const quarterStart = '2026-07-01T00:00:00Z';
+const quarterEnd = '2026-09-30T23:59:59Z';
+
+export const DEMO_QUARTERLY_REPORT = buildReportPackage({
+  reportId: 'DEMO-2026-Q3',
+  cadence: 'quarterly',
+  contractId: 'DEMO-CONTRACT',
+  periodStart: quarterStart,
+  periodEnd: quarterEnd,
+  kpis: DEMO_KPI_DEFINITIONS.map((definition) => computeKpiObservation(definition, { periodStart: quarterStart, periodEnd: quarterEnd, plannedServiceMinutes: plannedServiceMinutesPerPeriod(quarterStart, quarterEnd), workOrders: DEMO_WORK_ORDERS }, evidence)),
+  priorBreachesByKpi: { mttr: 2 },
+});
+
+export const DEMO_OTHER_ASSETS: readonly MaximoAssetRecord[] = [
+  { assetId: 'ATC-ZC-11', name: 'Zone controller 11', assetClass: 'Signalling / ATC', location: 'Metro line', status: 'OPERATING', criticality: 'high' },
+  { assetId: 'SCADA-RTU-12', name: 'SCADA RTU 12', assetClass: 'SCADA', location: 'Metro line', status: 'OPERATING', criticality: 'medium' },
+];
+
+export const DEMO_OTHER_WORK_ORDERS: readonly MaximoWorkOrderRecord[] = [
+  { workOrderId: 'WO-2001', assetId: 'ATC-ZC-11', workType: 'CM', status: 'COMP', reportedAt: '2026-08-06T05:00:00Z', actualStartAt: '2026-08-06T05:15:00Z', completedAt: '2026-08-06T06:45:00Z', downtimeMinutes: 90, failureCode: 'COMM' },
+  { workOrderId: 'WO-2002', assetId: 'SCADA-RTU-12', workType: 'CM', status: 'COMP', reportedAt: '2026-08-19T14:00:00Z', actualStartAt: '2026-08-19T14:20:00Z', completedAt: '2026-08-19T15:05:00Z', downtimeMinutes: 45, failureCode: 'HW' },
+  { workOrderId: 'WO-2003', assetId: 'ATC-ZC-11', workType: 'PM', status: 'COMP', reportedAt: '2026-08-11T07:00:00Z', targetStartAt: '2026-08-13T00:00:00Z', actualStartAt: '2026-08-12T08:00:00Z', completedAt: '2026-08-12T10:00:00Z', downtimeMinutes: 0 },
+];
+
+export const DEMO_OTHER_SCOPE = { contractId: 'OTHER-CONTRACT', periodStart, periodEnd } as const;
+
+export const DEMO_OTHER_CONTRACT_KPI_SET: ContractKpiSet = {
+  contractId: 'OTHER-CONTRACT',
+  definitionVersion: 'demo-v1',
+  approvalStatus: 'demo_only',
+  definitions: DEMO_KPI_DEFINITIONS,
+  plannedServiceMinutesPerPeriod,
+  assetIds: DEMO_OTHER_ASSETS.map((asset) => asset.assetId),
+  evidence: { sourceSystem: 'contract_repository', entityType: 'kpi-definition-set', entityId: 'OTHER-CONTRACT/demo-v1', observedAt: periodStart },
+};
+
+export const DEMO_OTHER_REPORT = buildReportPackage({
+  reportId: 'OTHER-2026-08',
+  cadence: 'monthly',
+  contractId: 'OTHER-CONTRACT',
+  periodStart,
+  periodEnd,
+  kpis: DEMO_KPI_DEFINITIONS.map((definition) => computeKpiObservation(definition, { periodStart, periodEnd, plannedServiceMinutes: plannedServiceMinutesPerPeriod(periodStart, periodEnd), workOrders: DEMO_OTHER_WORK_ORDERS }, DEMO_OTHER_WORK_ORDERS.map((wo) => ({ sourceSystem: 'maximo', entityType: 'work-order', entityId: wo.workOrderId, observedAt: wo.reportedAt ?? periodEnd })))),
+});
+
+/** Everything the synthetic providers serve for both demo contracts. */
+export const DEMO_DATASET: SyntheticDataset = {
+  assets: [...DEMO_ASSETS, ...DEMO_OTHER_ASSETS],
+  workOrders: [...DEMO_WORK_ORDERS, ...DEMO_OTHER_WORK_ORDERS],
+  preventiveMaintenance: DEMO_PM_RECORDS,
+  conditionProfiles: DEMO_CONDITION_PROFILES,
+  kpiSets: [DEMO_CONTRACT_KPI_SET, DEMO_OTHER_CONTRACT_KPI_SET],
+  invoices: DEMO_INVOICES,
+};
+
+/** Packages the demo deployment serves; the first is the default package. */
+export const DEMO_REPORT_REGISTRATIONS: readonly ReportRegistration[] = [
+  { seed: DEMO_REPORT, priorBreachesByKpi: DEMO_SCOPE.priorBreachesByKpi },
+  { seed: DEMO_QUARTERLY_REPORT, priorBreachesByKpi: DEMO_SCOPE.priorBreachesByKpi },
+  { seed: DEMO_OTHER_REPORT },
+];

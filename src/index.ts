@@ -52,3 +52,4 @@ export * from './reporting/approval.ts';
 export * from './reporting/contracts.ts';
 export * from './reporting/generator.ts';
 export * from './reporting/store.ts';
+export * from './reporting/registry.ts';
