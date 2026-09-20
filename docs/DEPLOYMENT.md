@@ -24,7 +24,9 @@ Run an OpenAI-compatible local inference endpoint using an open-source runtime s
 
 ## Modes
 
-`RAILMIND_MODE=demo` (default) runs the synthetic provider and the public demo identities. `RAILMIND_MODE=production` requires `RAILMIND_USERS`, `DATABASE_URL` and live adapters for every source; the server refuses to start when any is missing and never substitutes synthetic data. Only the Maximo read adapter exists today; contract-repository and condition-monitoring adapters are pending, so production mode cannot start yet by design.
+`RAILMIND_MODE=demo` (default) runs the synthetic provider and the public demo identities. `RAILMIND_MODE=production` requires `RAILMIND_USERS`, `DATABASE_URL`, `MAXIMO_BASE_URL`, `CONDITION_BASE_URL`, `CONTRACT_REPOSITORY_PATH` and the reporting scope (`RAILMIND_CONTRACT_ID`, `RAILMIND_PERIOD_START`, `RAILMIND_PERIOD_END`). The server names every missing item in one error, refuses to start, and never substitutes synthetic data. Three read-only adapters exist: the Maximo REST client (GET only), the condition-monitoring REST client (GET only; `GET /assets` and `GET /assets/{id}/profile`), and the contract repository document adapter. The document is a JSON export with schema `railmind.contract-kpi-sets/1`; the host reads the file, the domain validates every definition with the KPI authority rules, and a set that is not `approved` stops start-up. The seed report package for the configured scope is built through the governed pipeline at start and refreshed on every read.
+
+What production mode still does not have: enterprise SSO (the token directory is the interface), approved RTA KPI definitions (the demo set is `demo_only` and is refused), and Maximo object-structure mappings confirmed against a live tenant. None of these are code gaps; they are owner-environment inputs.
 
 ## Containers
 

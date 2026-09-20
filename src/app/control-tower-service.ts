@@ -161,6 +161,18 @@ export class ControlTowerService {
     };
   }
 
+  /**
+   * A report package for the scope built through the governed pipeline, used
+   * as the seed of a deployment whose package does not exist yet. The seed
+   * carries the current observations; the API refreshes them on every read.
+   */
+  async seedPackage(scope: TowerScope): Promise<ReportPackage> {
+    const kpiSet = await this.#providers.contract.getKpiSet(scope.contractId);
+    const workOrders = await this.#providers.maintenance.listWorkOrders(kpiSet?.value.assetIds ?? [], scope.periodStart);
+    const governed = computeGovernedKpis({ kpiSet, workOrders: workOrders.filter((r) => !r.value.reportedAt || r.value.reportedAt <= scope.periodEnd), periodStart: scope.periodStart, periodEnd: scope.periodEnd, asOf: this.#now(), mode: this.#providers.mode });
+    return buildReportPackage({ reportId: this.#seedReport.reportId, cadence: this.#seedReport.cadence, contractId: scope.contractId, periodStart: scope.periodStart, periodEnd: scope.periodEnd, kpis: governed.observations, priorBreachesByKpi: scope.priorBreachesByKpi });
+  }
+
   /** Period-to-date replay: each source event re-enters the same pipeline. Synthetic telemetry never edits KPI truth directly. */
   async timeline(scope: TowerScope, records: readonly ProvidedRecord<MaximoWorkOrderRecord>[], setup: { kpiSet: ProvidedRecord<import('../connectors/contract/port.ts').ContractKpiSet>; mode: DataProviders['mode'] } | null): Promise<readonly DtoSnapshot[]> {
     if (!setup) return [];

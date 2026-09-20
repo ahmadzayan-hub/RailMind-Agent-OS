@@ -19,6 +19,8 @@ const log = (level, message, fields = {}) => console.log(JSON.stringify({ ts: ne
 const bootstrap = (async () => {
   /** The `pg` driver is loaded here, in the host, so the domain layer never depends on it. */
   const overrides = {};
+  /** The contract repository export is read here and parsed by the domain; the file never reaches the domain layer as a path. */
+  if (config.contractRepositoryPath) overrides.contractDocument = JSON.parse(readFileSync(config.contractRepositoryPath, 'utf8'));
   if (config.databaseUrl) {
     const { createPgDatabase } = await import('./src/persistence/pg-database.ts');
     overrides.database = await createPgDatabase(config.databaseUrl);
