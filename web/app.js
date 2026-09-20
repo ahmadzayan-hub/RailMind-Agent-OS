@@ -1,4 +1,5 @@
 import { DEMO_PACK } from './data/demo-pack.js';
+import { GIS_PACK } from './data/gis-pack.js';
 
 /*
  * RailMind Control Tower preview.
@@ -12,6 +13,8 @@ import { DEMO_PACK } from './data/demo-pack.js';
 /* Static fallback until the API delivers the live Control Tower DTO. Both come from the same application service. */
 let pack = DEMO_PACK;
 let dataSource = 'static';
+/* GIS view: the synthetic schematic joined with the Control Tower DTO by src/gis/service.ts. Positions are canvas percentages, never coordinates. */
+let gisPack = GIS_PACK;
 
 const state = {
   language: 'ar',
@@ -309,6 +312,8 @@ async function loadLive() {
     if (tower.status === 200 && Array.isArray(tower.json.kpis)) {
       pack = tower.json;
       dataSource = 'live';
+      const gis = await api('/api/gis');
+      if (gis.status === 200 && Array.isArray(gis.json.nodes)) gisPack = gis.json;
       state.telemetry.index = pack.timeline.length - 1;
       renderAll();
       renderTelemetry();
@@ -461,7 +466,7 @@ const predictiveCopy = {
   ar: { kicker: 'صيانة استباقية · وكيل ذكاء الأصول', title: 'إشارات الصيانة الاستباقية', description: 'درجات مخاطر حتمية يحسبها وكيل مخاطر الأعطال في الخادم من منافذ الحالة وMaximo، وتُسجَّل في سجل التدقيق. لا يحسب المتصفح أي درجة، ولا تمثل تشخيصاً أو إنذاراً حياً.', count: 'أصول تتطلب مراجعة', model: 'railmind-legacy-v1', stream: 'مصدر الدرجات', boundary: '⌑ إشارات للقراءة والمراجعة فقط. لا يتم إنشاء أمر عمل أو تنفيذ أي إجراء تشغيلي تلقائياً. الأوزان تجريبية غير معايرة.', score: 'درجة المخاطر', driver: 'المحرك الرئيسي', route: 'افتح في الخريطة', source: 'مرجع التدقيق', review: 'مراجعة مهندس مُسمى', action: 'إجراء مقترح', load: 'حمّل الإشارات من وكيل مخاطر الأعطال', signInHint: 'سجّل الدخول بدور مهندس أو أعلى لتحميل الإشارات من الخادم.', empty: 'لم تُحمَّل إشارات بعد.', status: { critical: 'حرج', high: 'مرتفع', watch: 'متابعة', good: 'مستقر' } },
   en: { kicker: 'PREDICTIVE MAINTENANCE · ASSET INTELLIGENCE AGENT', title: 'Predictive maintenance signals', description: 'Deterministic risk scores computed server-side by the failure-risk agent from condition and Maximo ports and recorded in the audit trail. The browser scores nothing; this is not a live diagnosis or alarm.', count: 'assets need review', model: 'railmind-legacy-v1', stream: 'Score source', boundary: '⌑ Read and review only. No work order is created and no operational action is executed automatically. Weights are uncalibrated demo values.', score: 'Risk score', driver: 'Main driver', route: 'Open in map', source: 'Audit reference', review: 'Named engineer review', action: 'Proposed action', load: 'Load signals from the failure-risk agent', signInHint: 'Sign in as engineer or above to load signals from the server.', empty: 'No signals loaded yet.', status: { critical: 'Critical', high: 'High', watch: 'Watch', good: 'Stable' } },
 };
-const gisNodeForAsset = { 'ATC-ZC-01': 'atc', 'ATC-ZC-02': 'atc', 'TRAM-APS-03': 'fault' };
+const gisNodeForAsset = (assetId) => (gisPack.nodes.find((n) => n.kind === 'asset' && n.refs?.assetIds?.[0] === assetId)?.nodeId ?? null);
 const actionLabels = { ar: { inspect: 'فحص', schedule_pm: 'جدولة صيانة وقائية', replace_component: 'استبدال مكوّن', monitor: 'مراقبة' }, en: { inspect: 'Inspect', schedule_pm: 'Schedule PM', replace_component: 'Replace component', monitor: 'Monitor' } };
 
 async function loadPredictiveAlerts() {
@@ -493,7 +498,7 @@ function renderPredictiveAlerts() {
     $('#predictive-load')?.addEventListener('click', loadPredictiveAlerts);
     return;
   }
-  root.innerHTML = list.map((a) => { const severity = severityOf(a.riskBand); const top = a.drivers[0]; const node = gisNodeForAsset[a.assetId]; return `<article class="predictive-alert predictive-alert--${severity}" data-predictive-alert="${a.assetId}"><div class="predictive-alert__head"><span class="predictive-alert__icon">✦</span><div><div class="predictive-alert__title"><b dir="ltr">${a.assetId}</b><span class="predictive-alert__status">${copy.status[severity]}</span></div><small>${a.name}</small></div><div class="predictive-alert__score"><strong>${a.riskScore}<small>/100</small></strong><span>${copy.score}</span></div></div><div class="predictive-alert__details"><div><small>${copy.driver}</small><b>${top ? `${top.name} · ${Math.round(top.contribution * 100)}%` : '—'}</b></div><div><small>${copy.action}</small><b>${actionLabels[state.language][a.recommendation.action]} · ${a.recommendation.withinHours}h${a.recommendation.requiresEngineerReview ? ` · ${copy.review}` : ''}</b></div></div><div class="predictive-alert__footer"><span>⌁ <small>${copy.source}</small> <b dir="ltr">${state.predictive.runRef}</b></span>${node ? `<button type="button" data-predictive-node="${node}">${copy.route} <i>↗</i></button>` : ''}</div></article>`; }).join('') + `<div class="predictive-empty"><button type="button" class="approval-reset" id="predictive-load">↻ ${copy.load}</button></div>`;
+  root.innerHTML = list.map((a) => { const severity = severityOf(a.riskBand); const top = a.drivers[0]; const node = gisNodeForAsset(a.assetId); return `<article class="predictive-alert predictive-alert--${severity}" data-predictive-alert="${a.assetId}"><div class="predictive-alert__head"><span class="predictive-alert__icon">✦</span><div><div class="predictive-alert__title"><b dir="ltr">${a.assetId}</b><span class="predictive-alert__status">${copy.status[severity]}</span></div><small>${a.name}</small></div><div class="predictive-alert__score"><strong>${a.riskScore}<small>/100</small></strong><span>${copy.score}</span></div></div><div class="predictive-alert__details"><div><small>${copy.driver}</small><b>${top ? `${top.name} · ${Math.round(top.contribution * 100)}%` : '—'}</b></div><div><small>${copy.action}</small><b>${actionLabels[state.language][a.recommendation.action]} · ${a.recommendation.withinHours}h${a.recommendation.requiresEngineerReview ? ` · ${copy.review}` : ''}</b></div></div><div class="predictive-alert__footer"><span>⌁ <small>${copy.source}</small> <b dir="ltr">${state.predictive.runRef}</b></span>${node ? `<button type="button" data-predictive-node="${node}">${copy.route} <i>↗</i></button>` : ''}</div></article>`; }).join('') + `<div class="predictive-empty"><button type="button" class="approval-reset" id="predictive-load">↻ ${copy.load}</button></div>`;
   $$('[data-predictive-node]').forEach((button) => button.addEventListener('click', () => { switchView('network'); openGisInspector(button.dataset.predictiveNode); window.setTimeout(() => $('#gis-inspector')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 120); }));
   $('#predictive-load')?.addEventListener('click', loadPredictiveAlerts);
 }
@@ -508,35 +513,56 @@ const gisCopy = {
 const mttrText = () => { const k = pack.kpis.find((item) => item.id === 'mttr'); return `MTTR ${fmtValue('mttr', k.value)}${unit(k.unit)}`; };
 const assetFacts = (id) => pack.assets.find((a) => a.assetId === id);
 
-/* GIS positions and station names are illustrative. Facts referencing KPIs, work orders or assets are read from the pack. */
-const gisRecords = () => ({
-  centre: { type: 'station', status: 'stable', arName: 'محطة المركز المالي', enName: 'Financial Centre Station', arContext: 'نقطة شبكة مستقرة ضمن نموذج الخط الأحمر التوضيحي.', enContext: 'A stable network point within the illustrative Red Line model.', arFacts: [['حالة الخدمة', 'مستقر'], ['أصول مرتبطة', '2'], ['آخر تحديث', 'TLM محلي']], enFacts: [['Service state', 'Stable'], ['Linked assets', '2'], ['Latest refresh', 'Local TLM']], evidence: 'GIS Demo · ST-01', decision: 'availability' },
-  museum: { type: 'station', status: 'watch', arName: 'محطة منطقة المتحف', enName: 'Museum District Station', arContext: 'نقطة متابعة تتيح لمالك القرار مراجعة الحمل الوقائي المجدول.', enContext: 'A watch point for the decision owner to review scheduled preventive workload.', arFacts: [['حالة الخدمة', 'متابعة'], ['أوامر مفتوحة', String(assetFacts('ATC-ZC-01').openWorkOrders)], ['نافذة المراجعة', 'يوم عمل']], enFacts: [['Service state', 'Watch'], ['Open work orders', String(assetFacts('ATC-ZC-01').openWorkOrders)], ['Review window', 'One business day']], evidence: 'GIS Demo · ST-02 · WO-1005', decision: 'backlog' },
-  marina: { type: 'station', status: 'critical', arName: 'محطة المارينا', enName: 'Marina Station', arContext: 'نقطة محاكاة مرتبطة باستثناء زمن الإصلاح المتكرر وتستلزم مراجعة مسمّاة.', enContext: 'A simulated point linked to the persistent repair-time exception and requiring named review.', arFacts: [['حالة الخدمة', 'حرج'], ['المؤشر المرتبط', mttrText()], ['المراجعة', 'خلال 4 ساعات']], enFacts: [['Service state', 'Critical'], ['Linked metric', mttrText()], ['Review', 'Within 4 hours']], evidence: 'GIS Demo · ST-03 · EXC-MTTR', decision: 'mttr' },
-  terminal: { type: 'station', status: 'stable', arName: 'المحطة الطرفية', enName: 'Terminal Station', arContext: 'نقطة طرفية مستقرة في مخطط العرض، مع عدم وجود إجراء مطلوب.', enContext: 'A stable terminal point in the presentation schematic with no action required.', arFacts: [['حالة الخدمة', 'مستقر'], ['أوامر مفتوحة', '0'], ['القرار', 'لا يلزم']], enFacts: [['Service state', 'Stable'], ['Open work orders', '0'], ['Decision', 'None required']], evidence: 'GIS Demo · ST-04', decision: 'availability' },
-  atc: { type: 'asset', status: 'watch', arName: 'ATC-ZC-01', enName: 'ATC-ZC-01', arContext: 'أصل تحكم آلي ضمن عينة المحاكاة، مرتبط بنقطة متابعة جودة الخدمة.', enContext: 'An automatic-train-control asset in the simulation sample, linked to a service-quality watch point.', arFacts: [['الفئة', 'تحكم آلي'], ['أوامر مفتوحة', String(assetFacts('ATC-ZC-01').openWorkOrders)], ['أعطال الفترة', String(assetFacts('ATC-ZC-01').failureWorkOrders)]], enFacts: [['Class', 'Automatic train control'], ['Open orders', String(assetFacts('ATC-ZC-01').openWorkOrders)], ['Period failures', String(assetFacts('ATC-ZC-01').failureWorkOrders)]], evidence: 'Maximo Demo · ATC-ZC-01', decision: 'availability' },
-  signal: { type: 'asset', status: 'stable', arName: 'SIG-CB-14', enName: 'SIG-CB-14', arContext: 'أصل إشارات مستقر في العينة، يُعرض لتوضيح طبقة الأصول فقط.', enContext: 'A stable signalling asset in the sample, shown to illustrate the asset layer only.', arFacts: [['الفئة', 'إشارات'], ['الحالة', 'مستقر'], ['أوامر عمل', 'لا يوجد في العينة']], enFacts: [['Class', 'Signalling'], ['State', 'Stable'], ['Work orders', 'None in sample']], evidence: 'GIS Demo · SIG-CB-14', decision: 'availability' },
-  fault: { type: 'faultType', status: 'critical', arName: 'تنبيه MTTR متكرر', enName: 'Persistent MTTR alert', arContext: 'تنبيه استثنائي تولّده قواعد KPI التجريبية، وليس إنذاراً مباشراً من نظام تحكم.', enContext: 'An exception alert generated by demo KPI rules, not a direct control-system alarm.', arFacts: [['الشدة', 'حرج'], ['قاعدة KPI', `MTTR ${pack.provenance.formulaVersion}`], ['الحالة', 'مراجعة بشرية']], enFacts: [['Severity', 'Critical'], ['KPI rule', `MTTR ${pack.provenance.formulaVersion}`], ['State', 'Human review']], evidence: 'Maximo Demo · WO-1001…WO-1004', decision: 'mttr' },
-  'wo-1': { type: 'workorder', status: 'watch', arName: 'WO-1005', enName: 'WO-1005', arContext: 'أمر صيانة وقائية مفتوح ضمن الحزمة الاصطناعية، ويتطلب تأكيد الجدولة.', enContext: 'An open preventive-maintenance order in the synthetic pack, requiring schedule confirmation.', arFacts: [['الحالة', pack.workOrders.find((w) => w.workOrderId === 'WO-1005').status], ['الفئة', 'صيانة وقائية'], ['الاستحقاق', 'يوم عمل']], enFacts: [['State', pack.workOrders.find((w) => w.workOrderId === 'WO-1005').status], ['Class', 'Preventive maintenance'], ['Due', 'One business day']], evidence: 'Maximo Demo · WO-1005', decision: 'backlog' },
-  'train-r01': { type: 'train', status: 'stable', arName: 'قطار R01', enName: 'Train R01', arContext: 'قطار تمثيلي يتحرك ضمن نموذج الخط الأحمر المحلي. لا يمثل رحلة أو موقعاً فعلياً.', enContext: 'An illustrative train moving within the local Red Line model. It does not represent a live service or location.', arFacts: [['الحالة', 'حركة محاكاة'], ['المسار', 'الخط الأحمر التوضيحي'], ['المصدر', 'TLM محلي']], enFacts: [['State', 'Simulated movement'], ['Route', 'Illustrative Red Line'], ['Source', 'Local TLM']], evidence: 'GIS Demo · TR-R01', decision: 'availability' },
-  'train-r02': { type: 'train', status: 'watch', arName: 'قطار R02', enName: 'Train R02', arContext: 'قطار تمثيلي في حالة متابعة ضمن العرض المحلي. لا يمثل تنبيهاً من منظومة تحكم أو رحلة فعلية.', enContext: 'An illustrative train in a watch state within the local presentation. It is not a control-system alert or live service.', arFacts: [['الحالة', 'متابعة محاكاة'], ['السياق', 'مراجعة توضيحية'], ['المصدر', 'TLM محلي']], enFacts: [['State', 'Simulation watch'], ['Context', 'Illustrative review'], ['Source', 'Local TLM']], evidence: 'GIS Demo · TR-R02', decision: 'mttr' },
-  'train-r03': { type: 'train', status: 'stable', arName: 'قطار R03', enName: 'Train R03', arContext: 'قطار تمثيلي ثانٍ يعرض تباعد الحركة داخل المخطط المحلي فقط.', enContext: 'A second illustrative train that visualises service separation within the local schematic only.', arFacts: [['الحالة', 'حركة محاكاة'], ['المسار', 'الخط الأحمر التوضيحي'], ['المصدر', 'TLM محلي']], enFacts: [['State', 'Simulated movement'], ['Route', 'Illustrative Red Line'], ['Source', 'Local TLM']], evidence: 'GIS Demo · TR-R03', decision: 'backlog' },
-  'wo-2': { type: 'workorder', status: 'stable', arName: 'WO-1006', enName: 'WO-1006', arContext: 'أمر عمل مجدول في المحاكاة، مع مسار دليل يمكن عرضه قبل اتخاذ القرار.', enContext: 'A scheduled work order in the simulation, with an evidence trail available before a decision.', arFacts: [['الحالة', pack.workOrders.find((w) => w.workOrderId === 'WO-1006').status], ['الفئة', 'صيانة وقائية'], ['الاستحقاق', 'مؤكد']], enFacts: [['State', pack.workOrders.find((w) => w.workOrderId === 'WO-1006').status], ['Class', 'Preventive maintenance'], ['Due', 'Confirmed']], evidence: 'Maximo Demo · WO-1006', decision: 'backlog' },
-});
+/* Bilingual labels for GIS node kinds and joined facts. Values come from the GIS pack; nothing here is a fact. */
+const gisKindKey = { station: 'station', asset: 'asset', exception: 'faultType', 'work-order': 'workorder', train: 'train' };
+const gisFactCopy = {
+  ar: { assetStatus: 'حالة الأصل', openWorkOrders: 'أوامر عمل مفتوحة', failureWorkOrders: 'أعطال الفترة', downtimeMinutes: 'دقائق التوقف', workType: 'نوع العمل', workOrderStatus: 'حالة أمر العمل', severity: 'الشدة', kpi: 'قاعدة المؤشر', kpiStatus: 'حالة المؤشر', linkedAssets: 'أصول مرتبطة', simulated: 'محاكاة عرض', none: 'لا يوجد', noEvidence: 'لا توجد سجلات مصدر في الفترة', schematicNote: 'مخطط عرض اصطناعي: المواقع نسب على لوحة العرض وليست إحداثيات، وأسماء المحطات توضيحية. الحقائق مضمومة من حزمة برج التحكم.', trainNote: 'حركة قطار محاكاة للعرض فقط. لا تمثل موقعاً أو رحلة فعلية.', source: 'المصدر', joinedFrom: 'الحقائق مضمومة من' },
+  en: { assetStatus: 'Asset state', openWorkOrders: 'Open work orders', failureWorkOrders: 'Period failures', downtimeMinutes: 'Downtime minutes', workType: 'Work type', workOrderStatus: 'Work order status', severity: 'Severity', kpi: 'KPI rule', kpiStatus: 'KPI status', linkedAssets: 'Linked assets', simulated: 'Presentation simulation', none: 'None', noEvidence: 'No source records in the period', schematicNote: 'Synthetic presentation schematic: positions are canvas percentages, not coordinates, and station names are illustrative. Facts are joined from the Control Tower pack.', trainNote: 'Simulated train movement for presentation only. It is not a live position or service.', source: 'Source', joinedFrom: 'Facts joined from' },
+};
+const gisStatusLabel = (status) => gisCopy[state.language][`status${status[0].toUpperCase()}${status.slice(1)}`];
+const gisFactValue = (fact) => {
+  const copy = gisFactCopy[state.language];
+  if (fact.key === 'assetStatus') return gisStatusLabel(fact.value);
+  if (fact.key === 'simulated') return copy.simulated;
+  if (fact.key === 'severity') return fact.value === 'none' ? copy.none : (tx('severity')[fact.value] ?? fact.value);
+  return String(fact.value);
+};
+
+/* Markers are rendered from the GIS pack. Train markers stay in the markup because their movement is a CSS animation. */
+function renderGisNodes() {
+  const root = $('#gis-nodes');
+  if (!root) return;
+  const copy = gisCopy[state.language];
+  const markup = gisPack.nodes.filter((node) => node.kind !== 'train').map((node) => {
+    const pos = `style="top:${node.position.y}%;left:${node.position.x}%"`;
+    const common = `data-gis-node="${node.nodeId}" data-status="${node.status}" ${pos} tabindex="0" role="button"`;
+    const name = node.label[state.language];
+    if (node.kind === 'station') return `<div class="gis-station" ${common}><span class="station-core"></span><div class="station-label"><b>${name}</b><small>${node.code} · ${gisStatusLabel(node.status)}</small></div></div>`;
+    if (node.kind === 'asset') return `<div class="gis-asset-marker" data-gis-item="assets" ${common}><span>⌁</span><i></i><div class="gis-marker-label"><b dir="ltr">${node.code}</b><small>${copy.asset} · ${gisStatusLabel(node.status)}</small></div></div>`;
+    if (node.kind === 'exception') return `<div class="gis-fault-marker" data-gis-item="faults" ${common}><span>△</span><i></i><div class="gis-marker-label"><b>${name}</b><small dir="ltr">${node.exceptionId ?? node.code}</small></div></div>`;
+    const status = node.facts.find((f) => f.key === 'workOrderStatus')?.value ?? '';
+    const workType = node.facts.find((f) => f.key === 'workType')?.value ?? '';
+    return `<div class="gis-workorder-marker" data-gis-item="workorders" ${common}><span>WO</span><div class="gis-marker-label"><b dir="ltr">${node.code}</b><small dir="ltr">${status}${workType ? ` · ${workType}` : ''}</small></div></div>`;
+  }).join('');
+  root.innerHTML = markup;
+  gisPack.nodes.filter((node) => node.kind === 'train').forEach((node) => { const marker = $(`[data-gis-node="${node.nodeId}"]`); if (marker) marker.dataset.status = node.status; });
+  applyGisFilters();
+}
 
 function renderGisText() {
   if (!$('#view-network')) return;
   const copy = gisCopy[state.language];
-  const values = { 'gis-kicker': 'kicker', 'gis-title': 'title', 'gis-description': 'description', 'gis-boundary-title': 'boundaryTitle', 'gis-boundary-copy': 'boundaryCopy', 'gis-layers-title': 'layersTitle', 'gis-layers-copy': 'layersCopy', 'gis-assets-label': 'assets', 'gis-faults-label': 'faults', 'gis-workorders-label': 'workorders', 'gis-trains-label': 'trains', 'gis-trains-count': 'trainsCount', 'gis-train-hud-title': 'trainHudTitle', 'gis-train-hud-copy': 'trainHudCopy', 'gis-filter-label': 'filter', 'gis-clear-filter': 'clear', 'gis-stream-title': 'streamTitle', 'gis-stream-copy': 'streamCopy', 'gis-map-mode': 'mapMode', 'gis-map-scope': 'mapScope', 'gis-station-centre': 'centre', 'gis-station-museum': 'museum', 'gis-station-marina': 'marina', 'gis-station-terminal': 'terminal', 'gis-atc-label': 'atc', 'gis-signal-label': 'signal', 'gis-fault-label': 'fault', 'gis-wo-1-label': 'woOne', 'gis-wo-2-label': 'woTwo', 'gis-caption-title': 'captionTitle', 'gis-caption-copy': 'captionCopy', 'gis-inspector-title': 'inspectorTitle', 'gis-inspector-copy': 'inspectorCopy', 'gis-evidence-label': 'evidence', 'gis-open-decision': 'decision', 'gis-status-strip-title': 'statusTitle' };
+  const values = { 'gis-kicker': 'kicker', 'gis-title': 'title', 'gis-description': 'description', 'gis-boundary-title': 'boundaryTitle', 'gis-boundary-copy': 'boundaryCopy', 'gis-layers-title': 'layersTitle', 'gis-layers-copy': 'layersCopy', 'gis-assets-label': 'assets', 'gis-faults-label': 'faults', 'gis-workorders-label': 'workorders', 'gis-trains-label': 'trains', 'gis-trains-count': 'trainsCount', 'gis-train-hud-title': 'trainHudTitle', 'gis-train-hud-copy': 'trainHudCopy', 'gis-filter-label': 'filter', 'gis-clear-filter': 'clear', 'gis-stream-title': 'streamTitle', 'gis-stream-copy': 'streamCopy', 'gis-map-mode': 'mapMode', 'gis-map-scope': 'mapScope', 'gis-caption-title': 'captionTitle', 'gis-caption-copy': 'captionCopy', 'gis-inspector-title': 'inspectorTitle', 'gis-inspector-copy': 'inspectorCopy', 'gis-evidence-label': 'evidence', 'gis-open-decision': 'decision', 'gis-status-strip-title': 'statusTitle' };
   Object.entries(values).forEach(([id, key]) => { const element = $(`#${id}`); if (element) element.textContent = copy[key]; });
-  $('#gis-assets-count').textContent = isAr() ? `${pack.assets.length} أصول في العينة` : `${pack.assets.length} assets in sample`;
-  $('#gis-faults-count').textContent = isAr() ? `${criticalCount()} استثناء حرج` : `${criticalCount()} critical exception(s)`;
-  $('#gis-workorders-count').textContent = isAr() ? `${openWorkOrders()} أوامر عمل مفتوحة` : `${openWorkOrders()} open work orders`;
-  const nodes = $$('[data-gis-node]');
-  const count = (s) => nodes.filter((n) => n.dataset.status === s).length;
-  $('#gis-status-strip-copy').textContent = isAr() ? `${count('critical')} حرج · ${count('watch')} متابعة · ${count('stable')} مستقرة · يتم التحديث محلياً فقط` : `${count('critical')} critical · ${count('watch')} watch · ${count('stable')} stable · locally updated only`;
+  const counts = gisPack.counts;
+  $('#gis-assets-count').textContent = isAr() ? `${counts.assets} أصول في العينة` : `${counts.assets} assets in sample`;
+  $('#gis-faults-count').textContent = isAr() ? `${counts.criticalExceptions} استثناء حرج` : `${counts.criticalExceptions} critical exception(s)`;
+  $('#gis-workorders-count').textContent = isAr() ? `${counts.openWorkOrders} أوامر عمل مفتوحة` : `${counts.openWorkOrders} open work orders`;
+  const by = counts.byStatus;
+  $('#gis-status-strip-copy').textContent = isAr() ? `${by.critical} حرج · ${by.watch} متابعة · ${by.stable} مستقرة · مضمومة من ${gisPack.provenance.reportId}` : `${by.critical} critical · ${by.watch} watch · ${by.stable} stable · joined from ${gisPack.provenance.reportId}`;
+  $('#gis-map-scope').textContent = `${copy.mapScope} · ${gisPack.line.label[state.language]}`;
   $$('.gis-filter').forEach((button) => { button.textContent = copy[button.dataset.gisFilter]; });
-  [['.gis-station--a small', 'ST-01'], ['.gis-station--b small', 'ST-02'], ['.gis-station--c small', 'ST-03'], ['.gis-station--d small', 'ST-04']].forEach(([selector, code]) => { const node = $(selector); const parent = node?.closest('[data-gis-node]'); if (node && parent) node.textContent = `${code} · ${copy[`status${parent.dataset.status[0].toUpperCase()}${parent.dataset.status.slice(1)}`]}`; });
+  renderGisNodes();
   renderGisStream();
 }
 
@@ -587,19 +613,22 @@ function applyGisFilters() {
 }
 
 function openGisInspector(nodeId) {
-  const record = gisRecords()[nodeId];
-  if (!record) return;
+  const node = gisPack.nodes.find((n) => n.nodeId === nodeId);
+  if (!node) return;
   const copy = gisCopy[state.language];
+  const facts = gisFactCopy[state.language];
   state.gis.selected = nodeId;
   $('#gis-inspector-idle').hidden = true;
   $('#gis-inspector-detail').hidden = false;
-  $('#gis-inspector-type').textContent = copy[record.type];
-  $('#gis-inspector-status').innerHTML = `<span class="status-pill status-pill--${record.status}"><i>●</i>${copy[`status${record.status[0].toUpperCase()}${record.status.slice(1)}`]}</span>`;
-  $('#gis-inspector-name').textContent = record[`${state.language}Name`];
-  $('#gis-inspector-context').textContent = record[`${state.language}Context`];
-  $('#gis-inspector-facts').innerHTML = record[`${state.language}Facts`].map(([label, value]) => `<div><small>${label}</small><b>${value}</b></div>`).join('');
-  $('#gis-inspector-evidence').textContent = record.evidence;
-  $('#gis-open-decision').dataset.decision = record.decision;
+  $('#gis-inspector-type').textContent = copy[gisKindKey[node.kind]];
+  $('#gis-inspector-status').innerHTML = `<span class="status-pill status-pill--${node.status}"><i>●</i>${gisStatusLabel(node.status)}</span>`;
+  $('#gis-inspector-name').textContent = node.label[state.language];
+  $('#gis-inspector-context').textContent = node.kind === 'train' ? facts.trainNote : facts.schematicNote;
+  $('#gis-inspector-facts').innerHTML = node.facts.map((fact) => `<div><small>${facts[fact.key] ?? fact.key}</small><b>${gisFactValue(fact)}</b></div>`).join('');
+  $('#gis-inspector-evidence').textContent = node.evidence.length ? `${facts.source}: ${[...new Set(node.evidence.map((e) => `${e.sourceSystem}/${e.entityId}`))].join(' · ')}` : facts.noEvidence;
+  const decision = node.refs?.kpiId ?? '';
+  $('#gis-open-decision').dataset.decision = decision;
+  $('#gis-open-decision').hidden = !decision;
   $$('.gis-item--selected').forEach((item) => item.classList.remove('gis-item--selected'));
   $(`[data-gis-node="${nodeId}"]`)?.classList.add('gis-item--selected');
 }
@@ -778,12 +807,11 @@ function setupGisControls() {
   $$('[data-gis-layer]').forEach((input) => input.addEventListener('change', () => { state.gis.layers[input.dataset.gisLayer] = input.checked; applyGisFilters(); }));
   $$('.gis-filter').forEach((button) => button.addEventListener('click', () => { state.gis.filter = button.dataset.gisFilter; applyGisFilters(); }));
   $('#gis-clear-filter').addEventListener('click', () => { state.gis.filter = 'all'; $$('[data-gis-layer]').forEach((input) => { input.checked = true; state.gis.layers[input.dataset.gisLayer] = true; }); applyGisFilters(); toast(isAr() ? 'تمت استعادة جميع طبقات محاكاة GIS.' : 'All GIS simulation layers restored.'); });
-  $$('[data-gis-node]').forEach((item) => {
-    item.addEventListener('click', () => openGisInspector(item.dataset.gisNode));
-    item.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openGisInspector(item.dataset.gisNode); } });
-  });
+  const viewport = $('#gis-map-viewport');
+  viewport?.addEventListener('click', (event) => { const item = event.target.closest('[data-gis-node]'); if (item) openGisInspector(item.dataset.gisNode); });
+  viewport?.addEventListener('keydown', (event) => { const item = event.target.closest('[data-gis-node]'); if (item && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); openGisInspector(item.dataset.gisNode); } });
   $('#gis-close-inspector').addEventListener('click', closeGisInspector);
-  $('#gis-open-decision').addEventListener('click', () => openDecision($('#gis-open-decision').dataset.decision || 'mttr'));
+  $('#gis-open-decision').addEventListener('click', () => { const decision = $('#gis-open-decision').dataset.decision; if (decision) openDecision(decision); });
   $('#gis-zoom-in').addEventListener('click', () => setGisZoom(state.gis.zoom + 0.08));
   $('#gis-zoom-out').addEventListener('click', () => setGisZoom(state.gis.zoom - 0.08));
   $('#gis-fit-network').addEventListener('click', () => setGisZoom(1));

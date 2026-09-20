@@ -369,3 +369,30 @@ test('API scopes every report package to its contract: listing, reads, transitio
     assert.equal(audit.json.chain.valid, true);
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await app.close(); }
 });
+
+test('API serves the GIS view per report within scope and fails closed without a schematic adapter', async () => {
+  const { composeApplication } = await import('../src/app/compose.ts');
+  const { loadConfig } = await import('../src/config.ts');
+  const app = await composeApplication(loadConfig({}), { now: () => '2026-09-09T12:00:00Z' });
+  const handler = createApiHandler(app.api);
+  const bare = createApiHandler({ ...app.api, gis: undefined });
+  const server = createServer(async (req, res) => { if (await ((req.url ?? '').includes('bare=1') ? bare(req, res) : handler(req, res))) return; res.writeHead(404); res.end(); });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const get = async (path: string, token: string) => { const response = await fetch(`${base}${path}`, { headers: { Authorization: `Bearer ${token}` } }); return { status: response.status, json: await response.json() as Record<string, any> }; };
+  try {
+    const view = await get('/api/gis', 'demo-viewer');
+    assert.equal(view.status, 200);
+    assert.equal(view.json.provenance.positionsAreCoordinates, false);
+    assert.equal(view.json.provenance.reportId, 'DEMO-2026-08');
+    assert.equal(view.json.generatedAt, '2026-09-09T12:00:00Z');
+    assert.ok(view.json.nodes.every((n: { status: string }) => ['stable', 'watch', 'critical'].includes(n.status)));
+    const quarterly = await get('/api/gis?reportId=DEMO-2026-Q3', 'demo-engineer');
+    assert.equal(quarterly.json.provenance.reportId, 'DEMO-2026-Q3');
+    assert.equal((await get('/api/gis?reportId=OTHER-2026-08', 'demo-engineer')).status, 403);
+    assert.equal((await get('/api/gis?reportId=NOPE', 'demo-admin')).status, 404);
+    assert.equal((await get('/api/gis?lineId=NOPE', 'demo-admin')).status, 404);
+    assert.equal((await get('/api/gis?bare=1', 'demo-admin')).status, 503, 'no schematic adapter: fail closed');
+    assert.equal((await fetch(`${base}/api/gis`)).status, 401);
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await app.close(); }
+});

@@ -21,6 +21,8 @@ import { OpenAiCompatibleGateway } from '../llm/openai-compatible.ts';
 import type { SqlDatabase } from '../persistence/sql.ts';
 import { InMemoryReportStore, type ReportStore } from '../reporting/store.ts';
 import { createReportRegistry } from '../reporting/registry.ts';
+import { InMemoryGisReadPort, type GisReadPort } from '../gis/contracts.ts';
+import { DEMO_SCHEMATIC } from '../gis/demo-schematic.ts';
 import type { ApiDependencies } from '../api/router.ts';
 import { ControlTowerService, type TowerScope } from './control-tower-service.ts';
 import type { ReportPackage } from '../reporting/contracts.ts';
@@ -156,11 +158,13 @@ export async function composeApplication(config: AppConfig, overrides: ComposeOv
   if (config.mode === 'production') seedReport = await controlTower.seedPackage(scope);
   /* Registered packages: the configured scope only in production; the demo serves two contracts and two cadences. */
   const reports = config.mode === 'production' ? createReportRegistry([{ seed: seedReport }]) : createReportRegistry(DEMO_REPORT_REGISTRATIONS);
+  /* GIS: the synthetic schematic serves the demo only. Production has no schematic adapter yet and /api/gis fails closed (503). */
+  const gis: GisReadPort | undefined = config.mode === 'production' ? undefined : new InMemoryGisReadPort([DEMO_SCHEMATIC]);
   /* Portfolio: synthetic provider in demo mode; a private provider would be injected here for internal builds and is refused in public builds by classification. */
   const portfolio = new PortfolioService(createSyntheticPortfolioProvider(), { now: overrides.now, publicBuild: config.mode === 'demo' });
 
   return {
-    api: { reportStore, auditLog, memoryStore, seedReport, persistence, runtime, classification: config.classification, now: overrides.now, tokenDirectory: createTokenDirectory(config.usersJson), healthCheck: overrides.database ? async () => { await overrides.database?.query('SELECT 1'); } : undefined, controlTower, scope, mode: providers.mode, ledger, portfolio, reports },
+    api: { reportStore, auditLog, memoryStore, seedReport, persistence, runtime, classification: config.classification, now: overrides.now, tokenDirectory: createTokenDirectory(config.usersJson), healthCheck: overrides.database ? async () => { await overrides.database?.query('SELECT 1'); } : undefined, controlTower, scope, mode: providers.mode, ledger, portfolio, reports, gis },
     runtime,
     providers,
     controlTower,
