@@ -297,3 +297,75 @@ test('API runs a declared sequence with per-task permission checks and rejects m
     assert.ok(audit.events.some((e) => e.action === 'agent.sequence_stopped'));
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await app.close(); }
 });
+
+test('API scopes every report package to its contract: listing, reads, transitions, Control Tower and reset by report id', async () => {
+  const { composeApplication } = await import('../src/app/compose.ts');
+  const { loadConfig } = await import('../src/config.ts');
+  const app = await composeApplication(loadConfig({}), { now: () => '2026-09-09T12:00:00Z' });
+  const handler = createApiHandler(app.api);
+  const server = createServer(async (req, res) => { if (await handler(req, res)) return; res.writeHead(404); res.end(); });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const call = async (method: string, path: string, body: unknown, token: string) => { const response = await fetch(`${base}${path}`, { method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: body === undefined ? undefined : JSON.stringify(body) }); return { status: response.status, json: await response.json() as Record<string, any> }; };
+  try {
+    const admin = await call('GET', '/api/reports', undefined, 'demo-admin');
+    assert.equal(admin.status, 200);
+    assert.deepEqual(admin.json.reports.map((r: { reportId: string; isDefault: boolean }) => [r.reportId, r.isDefault]), [['DEMO-2026-08', true], ['DEMO-2026-Q3', false], ['OTHER-2026-08', false]]);
+    assert.deepEqual(admin.json.contractIds, ['DEMO-CONTRACT', 'OTHER-CONTRACT']);
+    const engineer = await call('GET', '/api/reports', undefined, 'demo-engineer');
+    assert.deepEqual(engineer.json.reports.map((r: { reportId: string }) => r.reportId), ['DEMO-2026-08', 'DEMO-2026-Q3']);
+    const other = await call('GET', '/api/reports', undefined, 'demo-other-contract');
+    assert.deepEqual(other.json.reports.map((r: { reportId: string; status: string }) => [r.reportId, r.status]), [['OTHER-2026-08', 'draft']]);
+
+    // Reads: an explicit report id is scope-checked against its own contract, not the deployment default.
+    const ownRead = await call('GET', '/api/report?reportId=OTHER-2026-08', undefined, 'demo-other-contract');
+    assert.equal(ownRead.status, 200);
+    assert.equal(ownRead.json.report.contractId, 'OTHER-CONTRACT');
+    assert.equal(ownRead.json.report.kpis.length, 6);
+    assert.equal((await call('GET', '/api/report?reportId=OTHER-2026-08', undefined, 'demo-engineer')).status, 403);
+    assert.equal((await call('GET', '/api/report?reportId=DEMO-2026-Q3', undefined, 'demo-other-contract')).status, 403);
+    assert.equal((await call('GET', '/api/report?reportId=NOPE', undefined, 'demo-admin')).status, 404);
+
+    // Transitions are per package: submitting the quarterly package leaves the monthly one in draft.
+    const submitted = await call('POST', '/api/report/transition', { reportId: 'DEMO-2026-Q3', type: 'submit_for_review' }, 'demo-engineer');
+    assert.equal(submitted.status, 200, JSON.stringify(submitted.json));
+    assert.equal(submitted.json.report.reportId, 'DEMO-2026-Q3');
+    assert.equal(submitted.json.report.status, 'under_review');
+    assert.equal((await call('GET', '/api/report', undefined, 'demo-engineer')).json.report.status, 'draft');
+    assert.equal((await call('GET', '/api/report?reportId=DEMO-2026-Q3', undefined, 'demo-engineer')).json.report.status, 'under_review');
+    assert.equal((await call('POST', '/api/report/transition', { reportId: 'OTHER-2026-08', type: 'submit_for_review' }, 'demo-engineer')).status, 403);
+    const otherSubmit = await call('POST', '/api/report/transition', { reportId: 'OTHER-2026-08', type: 'submit_for_review' }, 'demo-other-contract');
+    assert.equal(otherSubmit.status, 200, JSON.stringify(otherSubmit.json));
+
+    // Control Tower by report or by contract, scope enforced the same way.
+    const quarterly = await call('GET', '/api/control-tower?reportId=DEMO-2026-Q3', undefined, 'demo-engineer');
+    assert.equal(quarterly.status, 200);
+    assert.equal(quarterly.json.report.reportId, 'DEMO-2026-Q3');
+    assert.equal(quarterly.json.report.status, 'under_review');
+    assert.equal(quarterly.json.report.periodStart, '2026-07-01T00:00:00Z');
+    const byContract = await call('GET', '/api/control-tower?contractId=OTHER-CONTRACT', undefined, 'demo-other-contract');
+    assert.equal(byContract.status, 200);
+    assert.equal(byContract.json.report.reportId, 'OTHER-2026-08');
+    assert.equal(byContract.json.freshness.records, 3);
+    assert.equal((await call('GET', '/api/control-tower?contractId=OTHER-CONTRACT', undefined, 'demo-engineer')).status, 403);
+    assert.equal((await call('GET', '/api/control-tower?contractId=UNKNOWN', undefined, 'demo-admin')).status, 404);
+    const defaultTower = await call('GET', '/api/control-tower', undefined, 'demo-engineer');
+    assert.equal(defaultTower.json.report.reportId, 'DEMO-2026-08');
+
+    // Agent runs honour the same boundary through task context.
+    const otherRun = await call('POST', '/api/agent/run', { capability: 'maintenance-kpi', goal: 'x', riskClass: 'operational', actionMode: 'analyse', context: { contractId: 'OTHER-CONTRACT' } }, 'demo-other-contract');
+    assert.equal(otherRun.status, 200, JSON.stringify(otherRun.json));
+    assert.equal(otherRun.json.output.value.contractId, 'OTHER-CONTRACT');
+    assert.equal(otherRun.json.output.value.workOrderCount, 3);
+    assert.equal((await call('POST', '/api/agent/run', { capability: 'maintenance-kpi', goal: 'x', riskClass: 'operational', actionMode: 'analyse', context: { contractId: 'OTHER-CONTRACT' } }, 'demo-engineer')).status, 403);
+
+    // Reset by report id restores only that package.
+    const reset = await call('POST', '/api/report/reset', { reportId: 'DEMO-2026-Q3' }, 'demo-admin');
+    assert.equal(reset.status, 200);
+    assert.equal(reset.json.report.reportId, 'DEMO-2026-Q3');
+    assert.equal(reset.json.audit.fromState, 'under_review');
+    assert.equal((await call('GET', '/api/report?reportId=OTHER-2026-08', undefined, 'demo-admin')).json.report.status, 'under_review');
+    const audit = await call('GET', '/api/audit', undefined, 'demo-admin');
+    assert.equal(audit.json.chain.valid, true);
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await app.close(); }
+});

@@ -14,6 +14,7 @@ import { computeEvidenceVersion, formulaVersionsOf } from '../reporting/evidence
 import { approvalInvalidated, reportReadiness, transitionReport, type ReportTransition } from '../reporting/approval.ts';
 import type { ReportPackage } from '../reporting/contracts.ts';
 import type { ReportStore } from '../reporting/store.ts';
+import { createReportRegistry, scopeOf, type ReportRegistration, type ReportRegistry } from '../reporting/registry.ts';
 
 /**
  * Local decision API. It mutates RailMind-owned state only (report status,
@@ -48,6 +49,8 @@ export interface ApiDependencies {
   portfolio?: PortfolioService;
   scope?: TowerScope;
   mode?: 'synthetic' | 'production';
+  /** Registered report packages (multi-report, multi-contract). Defaults to the seed report alone. */
+  reports?: ReportRegistry;
 }
 
 /** Structural subset of Node's IncomingMessage/ServerResponse so src/ stays runtime-neutral. */
@@ -182,23 +185,34 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
     }
   }
 
-  const contractScope = (): Scope => ({ type: 'contract', id: deps.scope?.contractId ?? deps.seedReport.contractId });
+  const registry: ReportRegistry = deps.reports ?? createReportRegistry([{ seed: deps.seedReport, ...(deps.scope?.priorBreachesByKpi ? { priorBreachesByKpi: deps.scope.priorBreachesByKpi } : {}) }]);
+  const contractScope = (registration: ReportRegistration = registry.default): Scope => ({ type: 'contract', id: registration.seed.contractId });
+  /** The scope a registered package is computed for; the deployment scope keeps precedence for the default package. */
+  const towerScope = (registration: ReportRegistration): TowerScope => (registration === registry.default && deps.scope ? deps.scope : scopeOf(registration));
 
-  async function currentReport(): Promise<ReportPackage> {
-    const stored = await deps.reportStore.get(deps.seedReport.reportId);
+  /** Resolves the package a request addresses: an explicit reportId, else the default package. Unknown ids are refused. */
+  function resolveReport(reportId: string | null | undefined): ReportRegistration {
+    if (reportId === null || reportId === undefined || reportId === '') return registry.default;
+    const found = registry.get(reportId);
+    if (!found) throw new HttpError(404, `Report ${reportId} is not registered in this deployment.`);
+    return found;
+  }
+
+  async function currentReport(registration: ReportRegistration = registry.default): Promise<ReportPackage> {
+    const stored = await deps.reportStore.get(registration.seed.reportId);
     if (stored) return stored;
-    await deps.reportStore.save(deps.seedReport);
-    return deps.seedReport;
+    await deps.reportStore.save(registration.seed);
+    return registration.seed;
   }
 
   /** The package's live KPI observations (through the governed pipeline when the service is configured). */
-  async function currentKpis(): Promise<ReportPackage['kpis']> {
-    if (deps.controlTower && deps.scope) {
-      const dto = await deps.controlTower.build(deps.scope);
-      const stored = await currentReport();
+  async function currentKpis(registration: ReportRegistration = registry.default): Promise<ReportPackage['kpis']> {
+    if (deps.controlTower) {
+      const dto = await deps.controlTower.build(towerScope(registration), undefined, registration.seed);
+      const stored = await currentReport(registration);
       return stored.kpis.length === dto.kpis.length ? stored.kpis.map((kpi) => { const live = dto.kpis.find((k) => k.id === kpi.definition.id); return live ? { ...kpi, value: live.value, status: live.status, readiness: live.readiness, decisionGrade: live.decisionGrade, evidence: live.evidence.map((e) => ({ sourceSystem: e.sourceSystem, entityType: e.entityType, entityId: e.entityId, observedAt: e.observedAt })) } : kpi; }) : stored.kpis;
     }
-    return (await currentReport()).kpis;
+    return (await currentReport(registration)).kpis;
   }
 
   async function ledgerAppend(input: Parameters<DecisionLedger['append']>[0]): Promise<void> {
@@ -211,9 +225,9 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
    * package changes, the package is superseded automatically and audited.
    * Policy does not allow a stale approval to stand.
    */
-  async function reconcileApproval(): Promise<{ report: ReportPackage; evidenceVersion: string }> {
-    const stored = await currentReport();
-    const kpis = await currentKpis();
+  async function reconcileApproval(registration: ReportRegistration = registry.default): Promise<{ report: ReportPackage; evidenceVersion: string }> {
+    const stored = await currentReport(registration);
+    const kpis = await currentKpis(registration);
     const evidenceVersion = await computeEvidenceVersion(kpis);
     if (!approvalInvalidated(stored, evidenceVersion)) return { report: stored, evidenceVersion };
     const result = transitionReport({ ...stored, kpis }, { type: 'supersede', actorId: 'system.evidence-monitor', actorRole: 'system', at: now(), reason: `Underlying evidence changed (${(stored.approval?.evidenceVersion ?? stored.evidenceVersion ?? '').slice(0, 12)} -> ${evidenceVersion.slice(0, 12)}); approval invalidated by policy.`, newEvidenceVersion: evidenceVersion });
@@ -225,8 +239,8 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
     return { report: result.ok ? result.report : stored, evidenceVersion };
   }
 
-  async function reportView(): Promise<unknown> {
-    const { report, evidenceVersion } = await reconcileApproval();
+  async function reportView(registration: ReportRegistration = registry.default): Promise<unknown> {
+    const { report, evidenceVersion } = await reconcileApproval(registration);
     const audit = await deps.auditLog.bySubject('report', report.reportId);
     const ledger = deps.ledger ? await deps.ledger.bySubject('report', report.reportId) : [];
     return { report, readiness: reportReadiness(report, evidenceVersion), evidenceVersion, audit, ledger, persistence: deps.persistence };
@@ -285,16 +299,30 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       const sequence = await deps.runtime.runSequence(tasks, { classification: deps.classification ?? 'synthetic' });
       return { status: sequence.status === 'completed' ? 200 : 422, body: sequence };
     }
+    if (method === 'GET' && path === '/api/reports') {
+      await require(principal, 'report.read', 'reports');
+      const visible = registry.list().filter((registration) => inScope(principal, contractScope(registration)));
+      const reports = [];
+      for (const registration of visible) {
+        const { report, evidenceVersion } = await reconcileApproval(registration);
+        reports.push({ reportId: report.reportId, cadence: report.cadence, contractId: report.contractId, periodStart: report.periodStart, periodEnd: report.periodEnd, status: report.status, readiness: reportReadiness(report, evidenceVersion), evidenceVersion, isDefault: registration === registry.default });
+      }
+      return { status: 200, body: { reports, contractIds: [...new Set(reports.map((r) => r.contractId))], persistence: deps.persistence } };
+    }
     if (method === 'GET' && path === '/api/report') {
-      await require(principal, 'report.read', 'report', contractScope());
-      return { status: 200, body: await reportView() };
+      const registration = resolveReport(query.get('reportId'));
+      await require(principal, 'report.read', registration.seed.reportId, contractScope(registration));
+      return { status: 200, body: await reportView(registration) };
     }
     if (method === 'GET' && path === '/api/control-tower') {
-      await require(principal, 'report.read', 'control-tower', contractScope());
-      if (!deps.controlTower || !deps.scope) throw new HttpError(503, 'Control Tower service is not configured.');
+      const requestedContract = query.get('contractId');
+      const registration = query.get('reportId') ? resolveReport(query.get('reportId')) : requestedContract ? (registry.forContract(requestedContract)[0] ?? null) : registry.default;
+      if (!registration) throw new HttpError(404, `No report package is registered for contract ${requestedContract}.`);
+      await require(principal, 'report.read', 'control-tower', contractScope(registration));
+      if (!deps.controlTower) throw new HttpError(503, 'Control Tower service is not configured.');
       const asOf = query.get('asOf') ?? undefined;
       if (asOf !== undefined && Number.isNaN(Date.parse(asOf))) throw new HttpError(400, 'asOf must be an ISO timestamp.');
-      return { status: 200, body: await deps.controlTower.build(deps.scope, asOf) };
+      return { status: 200, body: await deps.controlTower.build(towerScope(registration), asOf, registration.seed) };
     }
     if (method === 'GET' && path === '/api/audit') {
       await require(principal, 'audit.read', 'audit');
@@ -307,10 +335,11 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
     }
     if (method === 'POST' && path === '/api/report/transition') {
       const body = await readJson(req);
-      const { report, evidenceVersion } = await reconcileApproval();
-      const kpis = await currentKpis();
+      const registration = resolveReport(str(body, 'reportId'));
+      const { report, evidenceVersion } = await reconcileApproval(registration);
+      const kpis = await currentKpis(registration);
       const transition = buildTransition(body, now(), principal, evidenceVersion);
-      await require(principal, TRANSITION_PERMISSION[transition.type], deps.seedReport.reportId, contractScope());
+      await require(principal, TRANSITION_PERMISSION[transition.type], registration.seed.reportId, contractScope(registration));
       const result = transitionReport({ ...report, kpis }, transition);
       const audit = await deps.auditLog.append(result.audit);
       if (result.ok) {
@@ -348,23 +377,25 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       return { status: 200, body: trace };
     }
     if (method === 'POST' && path === '/api/report/reset') {
-      await readJson(req);
-      await require(principal, 'report.reset', deps.seedReport.reportId, contractScope());
+      const body = await readJson(req);
+      const registration = resolveReport(str(body, 'reportId'));
+      const seed = registration.seed;
+      await require(principal, 'report.reset', seed.reportId, contractScope(registration));
       const actorId = principal.principalId;
-      const previous = await currentReport();
-      await deps.reportStore.save(deps.seedReport);
+      const previous = await currentReport(registration);
+      await deps.reportStore.save(seed);
       const audit = await deps.auditLog.append({
         action: 'report.reset',
         actorId,
         actorRole: principal.role,
         subjectType: 'report',
-        subjectId: deps.seedReport.reportId,
+        subjectId: seed.reportId,
         at: now(),
         fromState: previous.status,
-        toState: deps.seedReport.status,
-        reason: 'Demo package restored to its seed state.',
+        toState: seed.status,
+        reason: 'Package restored to its seed state.',
       });
-      return { status: 200, body: { ok: true, audit, report: deps.seedReport, readiness: reportReadiness(deps.seedReport) } };
+      return { status: 200, body: { ok: true, audit, report: seed, readiness: reportReadiness(seed) } };
     }
     if (method === 'POST' && path === '/api/agent/task') {
       await require(principal, 'agent.plan', 'agent', contractScope());
