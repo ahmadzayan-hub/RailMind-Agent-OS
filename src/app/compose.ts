@@ -1,6 +1,7 @@
 import { AGENT_CATALOG } from '../agent-os/catalog.ts';
 import type { ModelGateway } from '../agent-os/contracts.ts';
 import { InMemoryMemoryStore, type MemoryStore } from '../agent-os/memory.ts';
+import { InMemoryRunStore, type RunStore } from '../agent-os/run-store.ts';
 import { AgentRuntime } from '../agent-os/orchestrator.ts';
 import { buildStandardTools } from '../agent-os/standard-tools.ts';
 import { createStandardHandlers } from '../agents/index.ts';
@@ -71,16 +72,18 @@ export async function composeApplication(config: AppConfig, overrides: ComposeOv
   let memoryStore: MemoryStore;
   let reportStore: ReportStore;
   let ledger: DecisionLedger;
+  let runStore: RunStore;
   let persistence: ApiDependencies['persistence'] = 'in-memory';
   let close: () => Promise<void> = async () => {};
 
   if (overrides.database) {
-    const { PgAuditLog, PgDecisionLedger, PgMemoryStore, PgReportStore, ensureSchema } = await import('../persistence/postgres.ts');
+    const { PgAuditLog, PgDecisionLedger, PgMemoryStore, PgReportStore, PgRunStore, ensureSchema } = await import('../persistence/postgres.ts');
     await ensureSchema(overrides.database);
     auditLog = new PgAuditLog(overrides.database);
     memoryStore = new PgMemoryStore(overrides.database);
     reportStore = new PgReportStore(overrides.database);
     ledger = new PgDecisionLedger(overrides.database);
+    runStore = new PgRunStore(overrides.database);
     persistence = 'postgres';
     const db = overrides.database;
     close = () => db.close();
@@ -89,6 +92,7 @@ export async function composeApplication(config: AppConfig, overrides: ComposeOv
     memoryStore = new InMemoryMemoryStore();
     reportStore = new InMemoryReportStore();
     ledger = new InMemoryDecisionLedger();
+    runStore = new InMemoryRunStore();
   }
 
   /*
@@ -143,6 +147,7 @@ export async function composeApplication(config: AppConfig, overrides: ComposeOv
     modelGateway,
     modelPolicy: { baseUrl: config.llm.baseUrl, remoteApprovedForInternal: config.llm.remoteApprovedForInternal, remoteApprovedForConfidential: config.llm.remoteApprovedForConfidential },
     ledger,
+    runStore,
     now: overrides.now,
   });
 

@@ -253,7 +253,7 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
     }
     if (method === 'GET' && path === '/api/runs') {
       await require(principal, 'runs.read', 'runs');
-      return { status: 200, body: { runs: deps.runtime?.runs() ?? [] } };
+      return { status: 200, body: { runs: deps.runtime ? await deps.runtime.runs() : [], persistence: deps.persistence } };
     }
     if (method === 'POST' && path === '/api/agent/run') {
       const body = await readJson(req);

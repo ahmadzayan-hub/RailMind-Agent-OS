@@ -14,6 +14,7 @@ import type { CapabilityHandler } from './handlers.ts';
 import { createExecutionPlan } from './kernel.ts';
 import type { MemoryStore } from './memory.ts';
 import { hasDecisionGradeEvidence, isOutputReleaseReady } from './policy.ts';
+import { InMemoryRunStore, type RunStore } from './run-store.ts';
 import { ToolAccessError, ToolRegistry, createScopedInvoker } from './tools.ts';
 
 /**
@@ -36,6 +37,8 @@ export interface AgentRuntimeDependencies {
   modelPolicy: ModelInvocationPolicyConfig;
   /** Optional append-only ledger; every completed run records a recommendation entry. */
   ledger?: DecisionLedger;
+  /** Run record store; defaults to in-memory. PostgreSQL keeps records across restarts. */
+  runStore?: RunStore;
   now?: () => string;
   runId?: () => string;
 }
@@ -58,7 +61,7 @@ function extractKpiVersions(value: unknown): Readonly<Record<string, string>> {
 export class AgentRuntime {
   readonly #deps: AgentRuntimeDependencies;
   readonly #handlers = new Map<string, CapabilityHandler>();
-  readonly #runs: AgentRunRecord[] = [];
+  readonly #runs: RunStore;
   readonly #now: () => string;
   readonly #runId: () => string;
   #counter = 0;
@@ -69,6 +72,7 @@ export class AgentRuntime {
       if (this.#handlers.has(handler.capability)) throw new Error(`Duplicate handler for capability ${handler.capability}`);
       this.#handlers.set(handler.capability, handler);
     }
+    this.#runs = deps.runStore ?? new InMemoryRunStore();
     this.#now = deps.now ?? (() => new Date().toISOString());
     this.#runId = deps.runId ?? (() => { this.#counter += 1; return `RUN-${Date.parse(this.#now()).toString(36).toUpperCase()}-${this.#counter}`; });
   }
@@ -77,8 +81,12 @@ export class AgentRuntime {
     return [...this.#handlers.keys()];
   }
 
-  runs(): readonly AgentRunRecord[] {
-    return [...this.#runs];
+  runs(): Promise<readonly AgentRunRecord[]> {
+    return this.#runs.all();
+  }
+
+  record(runId: string): Promise<AgentRunRecord | null> {
+    return this.#runs.get(runId);
   }
 
   async run(task: AgentTask, options: RunOptions = {}): Promise<AgentRunRecord> {
@@ -91,9 +99,9 @@ export class AgentRuntime {
       sequences.push(event.sequence);
       return event;
     };
-    const finish = (partial: Omit<AgentRunRecord, 'runId' | 'task' | 'classification' | 'startedAt' | 'completedAt' | 'auditSequences'>): AgentRunRecord => {
+    const finish = async (partial: Omit<AgentRunRecord, 'runId' | 'task' | 'classification' | 'startedAt' | 'completedAt' | 'auditSequences'>): Promise<AgentRunRecord> => {
       const record: AgentRunRecord = { runId, task, classification, startedAt, completedAt: this.#now(), auditSequences: [...sequences], ...partial };
-      this.#runs.push(record);
+      await this.#runs.append(record);
       return record;
     };
 
