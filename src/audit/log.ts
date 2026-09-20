@@ -29,13 +29,22 @@ export type AuditAction =
   | 'agent.sequence_completed'
   | 'agent.sequence_stopped'
   | 'auth.denied'
-  | 'proposal.created';
+  | 'proposal.created'
+  | 'review.comment_created'
+  | 'review.comment_responded'
+  | 'review.comment_closed'
+  | 'review.transition_refused'
+  | 'disagreement.raised'
+  | 'disagreement.position_recorded'
+  | 'disagreement.resolved'
+  | 'disagreement.escalated'
+  | 'disagreement.transition_refused';
 
 export interface AuditEventInput {
   action: AuditAction;
   actorId: string;
   actorRole?: string;
-  subjectType: 'report' | 'task' | 'proposal' | 'run' | 'principal' | 'sequence';
+  subjectType: 'report' | 'task' | 'proposal' | 'run' | 'principal' | 'sequence' | 'comment' | 'disagreement';
   subjectId: string;
   at: string;
   fromState?: string;

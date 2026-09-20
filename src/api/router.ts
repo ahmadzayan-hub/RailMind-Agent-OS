@@ -1,11 +1,12 @@
 import { AGENT_CATALOG } from '../agent-os/catalog.ts';
 import type { ActionMode, AgentTask, DataClassification, HumanApproval, RiskClass } from '../agent-os/contracts.ts';
+import type { EvidenceRef } from '../agent-os/contracts.ts';
 import { createExecutionPlan } from '../agent-os/kernel.ts';
 import type { MemoryStore } from '../agent-os/memory.ts';
 import type { AgentRuntime } from '../agent-os/orchestrator.ts';
 import type { ControlTowerService, TowerScope } from '../app/control-tower-service.ts';
 import type { PortfolioService } from '../portfolio/service.ts';
-import { TRANSITION_PERMISSION, hasPermission, inScope, permissionsOf, runPermissionFor, type Permission, type Principal, type Scope } from '../auth/principal.ts';
+import { PARTIES, TRANSITION_PERMISSION, hasPermission, inScope, permissionsOf, runPermissionFor, type Permission, type Principal, type Scope } from '../auth/principal.ts';
 import type { TokenDirectory } from '../auth/token-directory.ts';
 import { securityHeaders } from '../http/security-headers.ts';
 import type { AuditLog } from '../audit/log.ts';
@@ -19,6 +20,8 @@ import type { GisReadPort } from '../gis/contracts.ts';
 import { buildGisView } from '../gis/service.ts';
 import type { ContractReadPort } from '../connectors/contract/port.ts';
 import { evaluateContractTwin } from '../contract-twin/service.ts';
+import type { ReviewStore } from '../review/store.ts';
+import { RESOLUTION_OUTCOMES, SUBJECT_TYPES, closeComment, createComment, escalateDisagreement, raiseDisagreement, recordPosition, resolveDisagreement, respondToComment, reviewBlockers, type Party, type ReviewActor, type ReviewSubject, type ReviewTransitionResult } from '../review/contracts.ts';
 
 /**
  * Local decision API. It mutates RailMind-owned state only (report status,
@@ -59,6 +62,8 @@ export interface ApiDependencies {
   gis?: GisReadPort;
   /** Contract repository port, used for the digital twin evaluation. */
   contract?: ContractReadPort;
+  /** Review comment sheet and disagreement state. */
+  reviewStore?: ReviewStore;
 }
 
 /** Structural subset of Node's IncomingMessage/ServerResponse so src/ stays runtime-neutral. */
@@ -116,6 +121,48 @@ async function readJson(req: ApiRequest): Promise<Record<string, unknown>> {
 function str(body: Record<string, unknown>, key: string): string | undefined {
   const value = body[key];
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+const SOURCE_SYSTEMS: readonly EvidenceRef['sourceSystem'][] = ['maximo', 'maximo_finance', 'contract_repository', 'condition_monitoring', 'inspection', 'manual', 'railmind'];
+
+/** Evidence references supplied by a reviewer: structural checks only; the reference is recorded as given and never verified against the source here. */
+function parseEvidence(body: Record<string, unknown>): readonly EvidenceRef[] {
+  const raw = body.evidence;
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw) || raw.length > 50) throw new HttpError(400, 'evidence must be a list of at most 50 references.');
+  return raw.map((item, index) => {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) throw new HttpError(400, `evidence[${index}] must be an object.`);
+    const ref = item as Record<string, unknown>;
+    const sourceSystem = ref.sourceSystem;
+    if (typeof sourceSystem !== 'string' || !(SOURCE_SYSTEMS as readonly string[]).includes(sourceSystem)) throw new HttpError(400, `evidence[${index}].sourceSystem must be one of ${SOURCE_SYSTEMS.join(', ')}.`);
+    const entityType = str(ref, 'entityType');
+    const entityId = str(ref, 'entityId');
+    const observedAt = str(ref, 'observedAt');
+    if (!entityType || !entityId || !observedAt || Number.isNaN(Date.parse(observedAt))) throw new HttpError(400, `evidence[${index}] requires entityType, entityId and an ISO observedAt.`);
+    return { sourceSystem: sourceSystem as EvidenceRef['sourceSystem'], entityType, entityId, observedAt };
+  });
+}
+
+function parseSubject(body: Record<string, unknown>): ReviewSubject {
+  const raw = body.subject;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new HttpError(400, 'subject must be an object with type and id.');
+  const subject = raw as Record<string, unknown>;
+  const type = str(subject, 'type');
+  const id = str(subject, 'id');
+  if (!type || !(SUBJECT_TYPES as readonly string[]).includes(type) || !id) throw new HttpError(400, `subject.type must be one of ${SUBJECT_TYPES.join(', ')} and subject.id is required.`);
+  return { type: type as ReviewSubject['type'], id };
+}
+
+/** The party a principal speaks for: its declared party, else the party named in the request (administrators). */
+function partyOf(principal: Principal, body: Record<string, unknown>): Party {
+  if (principal.party) return principal.party;
+  const declared = str(body, 'party');
+  if (!declared || !(PARTIES as readonly string[]).includes(declared)) throw new HttpError(400, `This principal has no declared party; the request must name party as one of ${PARTIES.join(', ')}.`);
+  return declared as Party;
+}
+
+function reviewActor(principal: Principal, party: Party): ReviewActor {
+  return { principalId: principal.principalId, role: principal.role, party };
 }
 
 function buildTransition(body: Record<string, unknown>, now: string, principal: Principal, evidenceVersion: string): ReportTransition {
@@ -247,11 +294,38 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
     return { report: result.ok ? result.report : stored, evidenceVersion };
   }
 
+  /** Approval blockers raised by the review layer: an open disagreement holds the package. */
+  async function openDisagreementBlockers(reportId: string): Promise<readonly string[]> {
+    if (!deps.reviewStore) return [];
+    return reviewBlockers(await deps.reviewStore.listDisagreements(reportId));
+  }
+
   async function reportView(registration: ReportRegistration = registry.default): Promise<unknown> {
     const { report, evidenceVersion } = await reconcileApproval(registration);
     const audit = await deps.auditLog.bySubject('report', report.reportId);
     const ledger = deps.ledger ? await deps.ledger.bySubject('report', report.reportId) : [];
-    return { report, readiness: reportReadiness(report, evidenceVersion), evidenceVersion, audit, ledger, persistence: deps.persistence };
+    const readiness = reportReadiness(report, evidenceVersion);
+    const review = await openDisagreementBlockers(report.reportId);
+    return { report, readiness: review.length ? { ...readiness, blockers: [...readiness.blockers, ...review] } : readiness, evidenceVersion, audit, ledger, persistence: deps.persistence };
+  }
+
+  async function reviewView(registration: ReportRegistration): Promise<unknown> {
+    if (!deps.reviewStore) throw new HttpError(503, 'No review store is configured in this deployment.');
+    const reportId = registration.seed.reportId;
+    const [comments, disagreements] = await Promise.all([deps.reviewStore.listComments(reportId), deps.reviewStore.listDisagreements(reportId)]);
+    return { reportId, contractId: registration.seed.contractId, comments, disagreements, approvalBlockers: reviewBlockers(disagreements), persistence: deps.persistence };
+  }
+
+  async function recordReview<T>(result: ReviewTransitionResult<T>, save: (record: T) => Promise<void>): Promise<{ status: number; body: unknown }> {
+    const audit = await deps.auditLog.append(result.audit);
+    if (result.ok) await save(result.record);
+    return { status: result.ok ? 200 : 409, body: { ok: result.ok, blockers: result.blockers, record: result.record, audit } };
+  }
+
+  async function reviewRegistration(reportId: string | undefined, principal: Principal, permission: Permission): Promise<ReportRegistration> {
+    const registration = resolveReport(reportId);
+    await require(principal, permission, registration.seed.reportId, contractScope(registration));
+    return registration;
   }
 
   async function route(method: string, path: string, req: ApiRequest): Promise<{ status: number; body: unknown }> {
@@ -353,6 +427,83 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       const tower = await deps.controlTower.build(towerScope(registration), undefined, registration.seed);
       return { status: 200, body: evaluateContractTwin(twin, tower, now()) };
     }
+    if (method === 'GET' && path === '/api/review') {
+      const registration = await reviewRegistration(query.get('reportId') ?? undefined, principal, 'report.read');
+      return { status: 200, body: await reviewView(registration) };
+    }
+    if (method === 'POST' && path === '/api/review/comment') {
+      const body = await readJson(req);
+      const registration = await reviewRegistration(str(body, 'reportId'), principal, 'review.comment');
+      if (!deps.reviewStore) throw new HttpError(503, 'No review store is configured in this deployment.');
+      const party = partyOf(principal, body);
+      const subject = parseSubject(body);
+      const counts = await deps.reviewStore.count();
+      const commentId = `CMT-${registration.seed.reportId}-${String(counts.comments + 1).padStart(3, '0')}`;
+      const result = createComment({ commentId, reportId: registration.seed.reportId, contractId: registration.seed.contractId, subject, actor: reviewActor(principal, party), text: str(body, 'text') ?? '', at: now() });
+      return recordReview(result, (record) => deps.reviewStore!.saveComment(record));
+    }
+    if (method === 'POST' && path === '/api/review/comment/transition') {
+      const body = await readJson(req);
+      if (!deps.reviewStore) throw new HttpError(503, 'No review store is configured in this deployment.');
+      const commentId = str(body, 'commentId');
+      const comment = commentId ? await deps.reviewStore.getComment(commentId) : null;
+      if (!comment) throw new HttpError(404, `Comment ${commentId ?? ''} not found.`);
+      await reviewRegistration(comment.reportId, principal, 'review.comment');
+      const actor = reviewActor(principal, partyOf(principal, body));
+      const type = str(body, 'type');
+      if (type === 'respond') return recordReview(respondToComment(comment, actor, str(body, 'text') ?? '', now()), (record) => deps.reviewStore!.saveComment(record));
+      if (type === 'close') return recordReview(closeComment(comment, actor, now()), (record) => deps.reviewStore!.saveComment(record));
+      throw new HttpError(400, 'type must be respond or close.');
+    }
+    if (method === 'POST' && path === '/api/review/disagreement') {
+      const body = await readJson(req);
+      const registration = await reviewRegistration(str(body, 'reportId'), principal, 'review.comment');
+      if (!deps.reviewStore) throw new HttpError(503, 'No review store is configured in this deployment.');
+      const party = partyOf(principal, body);
+      const subject = parseSubject(body);
+      const evidence = parseEvidence(body);
+      const counts = await deps.reviewStore.count();
+      const disagreementId = `DSG-${registration.seed.reportId}-${String(counts.disagreements + 1).padStart(3, '0')}`;
+      const result = raiseDisagreement({ disagreementId, reportId: registration.seed.reportId, contractId: registration.seed.contractId, subject, summary: str(body, 'summary') ?? '', raisedBy: reviewActor(principal, party), position: { text: str(body, 'text') ?? '', evidence }, at: now() });
+      const audit = await deps.auditLog.append(result.audit);
+      if (!result.ok) return { status: 409, body: { ok: false, blockers: result.blockers, record: result.record, audit } };
+      let ledgerId: string | undefined;
+      if (deps.ledger) {
+        const entry = await deps.ledger.append({ kind: 'disagreement', subjectType: 'disagreement', subjectId: disagreementId, at: now(), actorId: principal.principalId, actorRole: principal.role, payload: { reportId: registration.seed.reportId, subject, summary: result.record.summary, party, position: result.record.positions[party]?.text ?? null }, evidence, kpiVersions: {}, auditSequence: audit.sequence });
+        ledgerId = entry.ledgerId;
+      }
+      const record = ledgerId ? { ...result.record, ledgerId } : result.record;
+      await deps.reviewStore.saveDisagreement(record);
+      return { status: 200, body: { ok: true, blockers: [], record, audit } };
+    }
+    if (method === 'POST' && path === '/api/review/disagreement/transition') {
+      const body = await readJson(req);
+      if (!deps.reviewStore) throw new HttpError(503, 'No review store is configured in this deployment.');
+      const disagreementId = str(body, 'disagreementId');
+      const current = disagreementId ? await deps.reviewStore.getDisagreement(disagreementId) : null;
+      if (!current) throw new HttpError(404, `Disagreement ${disagreementId ?? ''} not found.`);
+      const type = str(body, 'type');
+      const text = str(body, 'text') ?? '';
+      if (type === 'record_position') {
+        await reviewRegistration(current.reportId, principal, 'review.comment');
+        const actor = reviewActor(principal, partyOf(principal, body));
+        return recordReview(recordPosition(current, actor, text, parseEvidence(body), now()), (record) => deps.reviewStore!.saveDisagreement(record));
+      }
+      if (type === 'resolve' || type === 'escalate') {
+        await reviewRegistration(current.reportId, principal, 'review.resolve');
+        const actor = { principalId: principal.principalId, role: principal.role };
+        const outcome = str(body, 'outcome') ?? '';
+        const result = type === 'resolve'
+          ? resolveDisagreement(current, { outcome: outcome as (typeof RESOLUTION_OUTCOMES)[number], text, actor, at: now(), evidence: parseEvidence(body) })
+          : escalateDisagreement(current, actor, text, now());
+        const audit = await deps.auditLog.append(result.audit);
+        if (!result.ok) return { status: 409, body: { ok: false, blockers: result.blockers, record: current, audit } };
+        await deps.reviewStore.saveDisagreement(result.record);
+        if (deps.ledger) await deps.ledger.append({ kind: 'resolution', subjectType: 'disagreement', subjectId: current.disagreementId, at: now(), actorId: principal.principalId, actorRole: principal.role, payload: { reportId: current.reportId, outcome: result.record.resolution?.outcome ?? null, text: result.record.resolution?.text ?? null, positions: { owner: current.positions.owner?.text ?? null, contractor: current.positions.contractor?.text ?? null } }, evidence: result.record.resolution?.evidence ?? [], kpiVersions: {}, follows: current.ledgerId, auditSequence: audit.sequence });
+        return { status: 200, body: { ok: true, blockers: [], record: result.record, audit } };
+      }
+      throw new HttpError(400, 'type must be record_position, resolve or escalate.');
+    }
     if (method === 'GET' && path === '/api/audit') {
       await require(principal, 'audit.read', 'audit');
       const events = await deps.auditLog.all();
@@ -369,6 +520,13 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       const kpis = await currentKpis(registration);
       const transition = buildTransition(body, now(), principal, evidenceVersion);
       await require(principal, TRANSITION_PERMISSION[transition.type], registration.seed.reportId, contractScope(registration));
+      if (transition.type === 'approve' || transition.type === 'lock') {
+        const held = await openDisagreementBlockers(report.reportId);
+        if (held.length > 0) {
+          const audit = await deps.auditLog.append({ action: 'report.transition_refused', actorId: principal.principalId, actorRole: principal.role, subjectType: 'report', subjectId: report.reportId, at: now(), fromState: report.status, reason: `${transition.type} refused: ${held.join(' ')}` });
+          return { status: 409, body: { ok: false, blockers: held, audit, report, readiness: { ...reportReadiness(report, evidenceVersion), blockers: held }, evidenceVersion } };
+        }
+      }
       const result = transitionReport({ ...report, kpis }, transition);
       const audit = await deps.auditLog.append(result.audit);
       if (result.ok) {

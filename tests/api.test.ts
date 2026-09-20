@@ -422,3 +422,74 @@ test('API evaluates the contract digital twin per report within scope', async ()
     assert.equal((await fetch(`${base}/api/contract-twin`)).status, 401);
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await app.close(); }
 });
+
+test('API review workflow: comment sheet, disagreement positions, named resolution, and approval held while a disagreement is open', async () => {
+  const { composeApplication } = await import('../src/app/compose.ts');
+  const { loadConfig } = await import('../src/config.ts');
+  const app = await composeApplication(loadConfig({}), { now: () => '2026-09-09T12:00:00Z' });
+  const handler = createApiHandler(app.api);
+  const server = createServer(async (req, res) => { if (await handler(req, res)) return; res.writeHead(404); res.end(); });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const call = async (method: string, path: string, body: unknown, token: string) => { const response = await fetch(`${base}${path}`, { method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: body === undefined ? undefined : JSON.stringify(body) }); return { status: response.status, json: await response.json() as Record<string, any> }; };
+  try {
+    // Comment sheet: the owner asks, the contractor answers, the sheet is scoped to the package's contract.
+    const comment = await call('POST', '/api/review/comment', { subject: { type: 'kpi', id: 'mttr' }, text: 'Confirm the repair clock for WO-1003.' }, 'demo-contract');
+    assert.equal(comment.status, 200, JSON.stringify(comment.json));
+    assert.equal(comment.json.record.actor.party, 'owner');
+    assert.equal(comment.json.record.commentId, 'CMT-DEMO-2026-08-001');
+    assert.equal((await call('POST', '/api/review/comment', { subject: { type: 'kpi', id: 'mttr' }, text: 'x' }, 'demo-viewer')).status, 403);
+    assert.equal((await call('POST', '/api/review/comment', { subject: { type: 'kpi', id: 'mttr' }, text: 'x' }, 'demo-other-contract')).status, 403);
+    assert.equal((await call('POST', '/api/review/comment', { subject: { type: 'kpi', id: 'mttr' }, text: 'x' }, 'demo-admin')).status, 400, 'an administrator must declare the party');
+    assert.equal((await call('POST', '/api/review/comment', { subject: { type: 'nope', id: 'x' }, text: 'x' }, 'demo-engineer')).status, 400);
+    const responded = await call('POST', '/api/review/comment/transition', { commentId: 'CMT-DEMO-2026-08-001', type: 'respond', text: 'Clock starts at the Maximo reported time.' }, 'demo-engineer');
+    assert.equal(responded.json.record.status, 'responded');
+    assert.equal(responded.json.record.responses[0].actor.party, 'contractor');
+
+    // Disagreement raised by the contractor with evidence; the package can be submitted but not approved while it is open.
+    const raised = await call('POST', '/api/review/disagreement', { subject: { type: 'kpi', id: 'mttr' }, summary: 'MTTR includes an owner-caused access delay.', text: 'WO-1004 waited for track access.', evidence: [{ sourceSystem: 'maximo', entityType: 'work-order', entityId: 'WO-1004', observedAt: '2026-08-25T06:00:00Z' }] }, 'demo-engineer');
+    assert.equal(raised.status, 200, JSON.stringify(raised.json));
+    const id = raised.json.record.disagreementId as string;
+    assert.equal(id, 'DSG-DEMO-2026-08-001');
+    assert.equal(raised.json.record.status, 'raised');
+    assert.ok(raised.json.record.ledgerId, 'raising writes a ledger record');
+    assert.equal((await call('POST', '/api/review/disagreement', { subject: { type: 'kpi', id: 'mttr' }, summary: 's', text: 't', evidence: [{ sourceSystem: 'facebook', entityType: 'x', entityId: 'y', observedAt: '2026-08-25T06:00:00Z' }] }, 'demo-engineer')).status, 400);
+    const review = await call('GET', '/api/review', undefined, 'demo-viewer');
+    assert.equal(review.json.comments.length, 1);
+    assert.equal(review.json.disagreements.length, 1);
+    assert.equal(review.json.approvalBlockers.length, 1);
+    const report = await call('GET', '/api/report', undefined, 'demo-viewer');
+    assert.ok(report.json.readiness.blockers.some((b: string) => b.includes(id)));
+
+    assert.equal((await call('POST', '/api/report/transition', { type: 'submit_for_review' }, 'demo-engineer')).status, 200);
+    const held = await call('POST', '/api/report/transition', { type: 'approve', note: 'Reviewed.' }, 'demo-approver');
+    assert.equal(held.status, 409);
+    assert.ok(held.json.blockers[0].includes(id));
+    assert.equal((await call('GET', '/api/report', undefined, 'demo-viewer')).json.report.status, 'under_review', 'the refused approval did not move the package');
+
+    // Resolution needs both positions and the review.resolve permission; a contractor cannot resolve.
+    const tooEarly = await call('POST', '/api/review/disagreement/transition', { disagreementId: id, type: 'resolve', outcome: 'agreed_compromise', text: 'x' }, 'demo-approver');
+    assert.equal(tooEarly.status, 409);
+    assert.equal((await call('POST', '/api/review/disagreement/transition', { disagreementId: id, type: 'resolve', outcome: 'agreed_compromise', text: 'x' }, 'demo-engineer')).status, 403);
+    const ownerPosition = await call('POST', '/api/review/disagreement/transition', { disagreementId: id, type: 'record_position', text: 'Access was granted inside the contractual window.' }, 'demo-reliability');
+    assert.equal(ownerPosition.status, 200, JSON.stringify(ownerPosition.json));
+    assert.equal(ownerPosition.json.record.status, 'positions_recorded');
+    const resolved = await call('POST', '/api/review/disagreement/transition', { disagreementId: id, type: 'resolve', outcome: 'agreed_compromise', text: 'Exclude 90 minutes of access delay; the remainder stands.' }, 'demo-approver');
+    assert.equal(resolved.status, 200, JSON.stringify(resolved.json));
+    assert.equal(resolved.json.record.status, 'resolved');
+    assert.equal(resolved.json.record.resolution.actor.principalId, 'demo.approver');
+
+    const approved = await call('POST', '/api/report/transition', { type: 'approve', note: 'Reviewed after resolution.' }, 'demo-approver');
+    assert.equal(approved.status, 200, JSON.stringify(approved.json));
+    assert.equal(approved.json.report.status, 'approved');
+
+    const ledger = await call('GET', `/api/ledger?subjectType=disagreement&subjectId=${id}`, undefined, 'demo-admin');
+    assert.deepEqual(ledger.json.records.map((r: { kind: string }) => r.kind), ['disagreement', 'resolution']);
+    assert.equal(ledger.json.records[1].follows, ledger.json.records[0].ledgerId);
+    const audit = await call('GET', '/api/audit', undefined, 'demo-admin');
+    assert.equal(audit.json.chain.valid, true);
+    const actions = audit.json.events.map((e: { action: string }) => e.action);
+    for (const expected of ['review.comment_created', 'review.comment_responded', 'disagreement.raised', 'report.transition_refused', 'disagreement.transition_refused', 'disagreement.position_recorded', 'disagreement.resolved', 'report.approved']) assert.ok(actions.includes(expected), expected);
+    assert.equal((await call('GET', '/api/review?reportId=OTHER-2026-08', undefined, 'demo-engineer')).status, 403);
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await app.close(); }
+});
