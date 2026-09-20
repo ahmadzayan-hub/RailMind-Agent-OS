@@ -1,7 +1,8 @@
 import type { EvidenceRef } from '../agent-os/contracts.ts';
 import type { CapabilityHandler, CapabilityResult } from '../agent-os/handlers.ts';
 import { ModelUnavailableError } from '../agent-os/model-guard.ts';
-import type { ContractReadInput } from '../agent-os/standard-tools.ts';
+import type { ContractReadInput, KnowledgeReadInput } from '../agent-os/standard-tools.ts';
+import type { KnowledgeHit } from '../knowledge/contracts.ts';
 import type { ContractKpiSet } from '../connectors/contract/port.ts';
 import type { ContractTwin } from '../contract-twin/contracts.ts';
 import type { GovernedKpiDefinition } from '../kpi/registry.ts';
@@ -65,6 +66,8 @@ export interface ContractContextValue {
     /** Obligations binding KPIs that are not in the definition set. */
     unboundKpiIds: readonly string[];
   } | null;
+  /** Reference passages about the contract's clauses, retrieved deterministically. Context only. */
+  references: readonly { ref: string; title: string; section: string | null; text: string }[];
 }
 
 export function summariseDefinition(definition: GovernedKpiDefinition): ContractDefinitionSummary {
@@ -134,7 +137,12 @@ export function createContractContextHandler(defaults: AnalysisScope): Capabilit
           modelFailure = error.message;
         }
       }
-      const evidence: EvidenceRef[] = twinRecord ? [kpiSet.evidence, twinRecord.evidence] : [kpiSet.evidence];
+      const clauseQuery = [...new Set([...definitions.map((d) => d.clauseRef).filter((c): c is string => c !== null), ...(twinRecord?.obligations.map((o) => o.clauseRef) ?? [])])].join(' ');
+      const hits: readonly KnowledgeHit[] = clauseQuery && context.tools.available('knowledge.read')
+        ? await context.tools.call<KnowledgeReadInput, readonly KnowledgeHit[]>('knowledge.read', { query: clauseQuery, contractId: scope.contractId, limit: 5 })
+        : [];
+      const references = hits.map((h) => ({ ref: `${h.documentId}/${h.passageId}`, title: h.title, section: h.section, text: h.text }));
+      const evidence: EvidenceRef[] = [kpiSet.evidence, ...(twinRecord ? [twinRecord.evidence] : []), ...hits.map((h) => h.evidence)];
       return {
         value: {
           contractId: scope.contractId,
@@ -149,6 +157,7 @@ export function createContractContextHandler(defaults: AnalysisScope): Capabilit
           notEffective,
           interpretation,
           twin,
+          references,
         },
         evidence,
         assumptions: [
@@ -156,6 +165,7 @@ export function createContractContextHandler(defaults: AnalysisScope): Capabilit
           'Every field is copied from the approved definition set; nothing is derived or redefined here.',
           twin ? `Contract twin ${twin.twinVersion} is ${twin.approvalStatus}${twin.contractual ? '' : ' and is NOT a contractual authority'}; ${twin.obligations.length} obligation(s) and ${twin.reportingDuties.length} reporting dut(y/ies) copied without change.` : 'The contract repository publishes no digital twin for this contract; obligations and reporting duties are unavailable.',
           ...(twin && twin.unboundKpiIds.length > 0 ? [`Twin obligations bind KPI(s) ${twin.unboundKpiIds.join(', ')} that are not in the approved definition set.`] : []),
+          ...(references.length > 0 ? [`${references.length} reference passage(s) retrieved for the clause references; they explain wording and are not contractual authority.`] : []),
           ...(interpretation ? ['The interpretation text was drafted by a model and is not a source of contractual fact.'] : []),
           ...(modelFailure ? [`Model unavailable (${modelFailure}); no interpretation was drafted. The definitions above are unaffected.`] : []),
         ],

@@ -2,6 +2,8 @@ import type { AgentRunRecord, EvidenceRef } from '../agent-os/contracts.ts';
 import type { RunStore } from '../agent-os/run-store.ts';
 import type { ReviewStore } from '../review/store.ts';
 import type { Disagreement, ReviewComment } from '../review/contracts.ts';
+import { CLASSIFICATION_RANK, rankPassages, summariseKnowledgeDocument, validateKnowledgeDocument, withinClassification, type KnowledgeDocument, type KnowledgeDocumentSummary, type KnowledgeHit, type KnowledgeQuery, type KnowledgeStore } from '../knowledge/contracts.ts';
+import type { DataClassification } from '../agent-os/contracts.ts';
 import type { MemoryKind, MemoryRecord, MemoryStore } from '../agent-os/memory.ts';
 import {
   GENESIS_HASH,
@@ -127,6 +129,17 @@ CREATE TABLE IF NOT EXISTS railmind_disagreements (
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS railmind_disagreements_report_idx ON railmind_disagreements (report_id);
+
+CREATE TABLE IF NOT EXISTS railmind_knowledge_documents (
+  document_id    TEXT PRIMARY KEY,
+  classification TEXT NOT NULL,
+  contract_ids   TEXT[] NOT NULL DEFAULT '{}',
+  tags           TEXT[] NOT NULL DEFAULT '{}',
+  version        TEXT NOT NULL,
+  document       JSONB NOT NULL,
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS railmind_knowledge_documents_classification_idx ON railmind_knowledge_documents (classification);
 `;
 
 /** Advisory lock key that serialises audit appends across connections. */
@@ -473,5 +486,55 @@ export class PgReviewStore implements ReviewStore {
     const comments = await this.#db.query('SELECT count(*)::int AS n FROM railmind_review_comments');
     const disagreements = await this.#db.query('SELECT count(*)::int AS n FROM railmind_disagreements');
     return { comments: Number(comments.rows[0]?.n ?? 0), disagreements: Number(disagreements.rows[0]?.n ?? 0) };
+  }
+}
+
+/**
+ * Knowledge documents in RailMind's own table. Classification gating happens
+ * in SQL (documents above the ceiling are never read) and ranking is the same
+ * deterministic lexical scorer the in-memory store uses.
+ */
+export class PgKnowledgeStore implements KnowledgeStore {
+  readonly #db: SqlClient;
+
+  constructor(db: SqlClient) {
+    this.#db = db;
+  }
+
+  static allowed(ceiling: DataClassification): readonly string[] {
+    return (Object.keys(CLASSIFICATION_RANK) as DataClassification[]).filter((c) => CLASSIFICATION_RANK[c] <= CLASSIFICATION_RANK[ceiling]);
+  }
+
+  async upsert(document: KnowledgeDocument): Promise<void> {
+    const problems = validateKnowledgeDocument(document);
+    if (problems.length > 0) throw new Error(`Knowledge document ${document.documentId}: ${problems.join('; ')}.`);
+    await this.#db.query(
+      `INSERT INTO railmind_knowledge_documents (document_id, classification, contract_ids, tags, version, document, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, now())
+       ON CONFLICT (document_id) DO UPDATE SET classification = EXCLUDED.classification, contract_ids = EXCLUDED.contract_ids, tags = EXCLUDED.tags, version = EXCLUDED.version, document = EXCLUDED.document, updated_at = now()`,
+      [document.documentId, document.classification, [...(document.contractIds ?? [])], [...document.tags], document.version, JSON.stringify(document)],
+    );
+  }
+
+  async #visible(ceiling: DataClassification): Promise<readonly KnowledgeDocument[]> {
+    const result = await this.#db.query('SELECT document FROM railmind_knowledge_documents WHERE classification = ANY($1::text[]) ORDER BY document_id ASC', [PgKnowledgeStore.allowed(ceiling)]);
+    return result.rows.map((row) => { const raw = row.document; return (typeof raw === 'string' ? JSON.parse(raw) : raw) as KnowledgeDocument; });
+  }
+
+  async search(query: KnowledgeQuery): Promise<readonly KnowledgeHit[]> {
+    return rankPassages(await this.#visible(query.maxClassification), query);
+  }
+
+  async get(documentId: string, maxClassification: DataClassification): Promise<KnowledgeDocument | null> {
+    const result = await this.#db.query('SELECT document FROM railmind_knowledge_documents WHERE document_id = $1', [documentId]);
+    const row = result.rows[0];
+    if (!row) return null;
+    const raw = row.document;
+    const document = (typeof raw === 'string' ? JSON.parse(raw) : raw) as KnowledgeDocument;
+    return withinClassification(document, maxClassification) ? document : null;
+  }
+
+  async list(maxClassification: DataClassification): Promise<readonly KnowledgeDocumentSummary[]> {
+    return (await this.#visible(maxClassification)).map(summariseKnowledgeDocument);
   }
 }

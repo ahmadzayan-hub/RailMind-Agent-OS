@@ -21,6 +21,7 @@ import { buildGisView } from '../gis/service.ts';
 import type { ContractReadPort } from '../connectors/contract/port.ts';
 import { evaluateContractTwin } from '../contract-twin/service.ts';
 import type { ReviewStore } from '../review/store.ts';
+import type { KnowledgeReadPort } from '../knowledge/contracts.ts';
 import { RESOLUTION_OUTCOMES, SUBJECT_TYPES, closeComment, createComment, escalateDisagreement, raiseDisagreement, recordPosition, resolveDisagreement, respondToComment, reviewBlockers, type Party, type ReviewActor, type ReviewSubject, type ReviewTransitionResult } from '../review/contracts.ts';
 
 /**
@@ -64,6 +65,8 @@ export interface ApiDependencies {
   contract?: ContractReadPort;
   /** Review comment sheet and disagreement state. */
   reviewStore?: ReviewStore;
+  /** Private knowledge store; retrieval is gated by the deployment classification. */
+  knowledge?: KnowledgeReadPort;
 }
 
 /** Structural subset of Node's IncomingMessage/ServerResponse so src/ stays runtime-neutral. */
@@ -503,6 +506,20 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
         return { status: 200, body: { ok: true, blockers: [], record: result.record, audit } };
       }
       throw new HttpError(400, 'type must be record_position, resolve or escalate.');
+    }
+    if (method === 'GET' && path === '/api/knowledge') {
+      const contractId = query.get('contractId');
+      await require(principal, 'report.read', 'knowledge', contractId ? { type: 'contract', id: contractId } : undefined);
+      if (!deps.knowledge) throw new HttpError(503, 'No knowledge store is configured in this deployment.');
+      const ceiling = deps.classification ?? 'synthetic';
+      const text = query.get('query');
+      if (!text) return { status: 200, body: { classification: ceiling, documents: await deps.knowledge.list(ceiling), persistence: deps.persistence } };
+      if (text.length > 500) throw new HttpError(400, 'query must be at most 500 characters.');
+      const limitRaw = query.get('limit');
+      const limit = limitRaw ? Number(limitRaw) : undefined;
+      if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 20)) throw new HttpError(400, 'limit must be an integer between 1 and 20.');
+      const hits = await deps.knowledge.search({ query: text, contractId: contractId ?? undefined, limit, maxClassification: ceiling });
+      return { status: 200, body: { classification: ceiling, query: text, contractId: contractId ?? null, hits, persistence: deps.persistence } };
     }
     if (method === 'GET' && path === '/api/audit') {
       await require(principal, 'audit.read', 'audit');

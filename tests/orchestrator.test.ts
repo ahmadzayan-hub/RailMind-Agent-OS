@@ -16,6 +16,8 @@ import type { RetryPolicy } from '../src/agent-os/tools.ts';
 import { SourceUnavailableError } from '../src/providers/contracts.ts';
 import type { MaximoP0Port } from '../src/connectors/maximo/port.ts';
 import { InMemoryConditionReadPort } from '../src/connectors/condition/port.ts';
+import { InMemoryKnowledgeStore } from '../src/knowledge/contracts.ts';
+import { DEMO_KNOWLEDGE_DOCUMENTS } from '../src/knowledge/demo-documents.ts';
 import { InMemoryContractReadPort } from '../src/connectors/contract/port.ts';
 import { MockMaximoReadPort } from '../src/connectors/maximo/mock.ts';
 import { DEMO_ASSETS, DEMO_CONDITION_PROFILES, DEMO_CONTRACT_KPI_SET, DEMO_CONTRACT_TWIN, DEMO_INVOICES, DEMO_PM_RECORDS, DEMO_SCOPE, DEMO_WORK_ORDERS } from '../src/demo.ts';
@@ -26,12 +28,12 @@ function task(overrides: Partial<AgentTask> = {}): AgentTask {
 
 const NO_WAIT: RetryPolicy = { maxAttempts: 3, sleep: async () => {} };
 
-function runtime(options: { handlers?: readonly CapabilityHandler[]; model?: ModelGateway | null; baseUrl?: string | null; tools?: ToolRegistry; maximo?: MaximoP0Port; retry?: RetryPolicy } = {}) {
+function runtime(options: { handlers?: readonly CapabilityHandler[]; model?: ModelGateway | null; baseUrl?: string | null; tools?: ToolRegistry; maximo?: MaximoP0Port; retry?: RetryPolicy; classification?: 'synthetic' | 'internal' | 'confidential' } = {}) {
   const auditLog = new InMemoryAuditLog();
   const memoryStore = new InMemoryMemoryStore();
   const ledger = new InMemoryDecisionLedger();
   const maximo = options.maximo ?? new MockMaximoReadPort({ assets: DEMO_ASSETS, workOrders: DEMO_WORK_ORDERS, preventiveMaintenance: DEMO_PM_RECORDS, invoices: DEMO_INVOICES });
-  const tools = options.tools ?? buildStandardTools({ maximo, contract: new InMemoryContractReadPort([DEMO_CONTRACT_KPI_SET], [DEMO_CONTRACT_TWIN]), condition: new InMemoryConditionReadPort(DEMO_CONDITION_PROFILES), memory: memoryStore });
+  const tools = options.tools ?? buildStandardTools({ maximo, contract: new InMemoryContractReadPort([DEMO_CONTRACT_KPI_SET], [DEMO_CONTRACT_TWIN]), condition: new InMemoryConditionReadPort(DEMO_CONDITION_PROFILES), memory: memoryStore, knowledge: new InMemoryKnowledgeStore(DEMO_KNOWLEDGE_DOCUMENTS), classification: options.classification ?? 'synthetic' });
   let tick = 0;
   const rt = new AgentRuntime({ catalog: AGENT_CATALOG, tools, handlers: options.handlers ?? createStandardHandlers(DEMO_SCOPE), auditLog, memoryStore, ledger, modelGateway: options.model ?? null, modelPolicy: { baseUrl: options.baseUrl ?? null, remoteApprovedForInternal: false, remoteApprovedForConfidential: false }, retry: options.retry ?? NO_WAIT, now: () => new Date(Date.parse('2026-09-09T10:00:00Z') + (tick++) * 1000).toISOString() });
   return { rt, auditLog, memoryStore, ledger };
@@ -222,7 +224,11 @@ test('contract context copies the approved definition set through contract.read 
   assert.equal(record.approvalRequired, true, 'the kernel escalates contract context to contractual, so approval is required');
   assert.equal(record.releaseReady, false);
   assert.equal(record.modelUsed, false);
-  assert.deepEqual(record.toolCalls.map((c) => [c.toolId, c.summary]), [['contract.read', 'kpi-set DEMO-CONTRACT'], ['contract.read', 'twin DEMO-CONTRACT']]);
+  assert.deepEqual(record.toolCalls.map((c) => c.toolId), ['contract.read', 'contract.read', 'knowledge.read']);
+  assert.deepEqual(record.toolCalls.map((c) => c.summary).slice(0, 2), ['kpi-set DEMO-CONTRACT', 'twin DEMO-CONTRACT']);
+  const references = (record.output?.value as { references: { ref: string }[] }).references;
+  assert.ok(references.length > 0 && references.every((r) => r.ref.startsWith('KB-DEMO-')), 'clause references come from the knowledge corpus');
+  assert.ok(record.output?.evidence.some((e) => e.entityType === 'knowledge-passage'));
   const value = record.output?.value as { twin: { twinVersion: string; approvalStatus: string; contractual: boolean; obligations: unknown[]; reportingDuties: unknown[]; unboundKpiIds: string[] } | null; contractual: boolean; approvalStatus: string; definitions: { id: string; threshold: number | null; clauseRef: string | null; approvalStatus: string }[]; notEffective: string[]; plannedServiceMinutes: number; assetIds: string[] };
   assert.equal(value.contractual, false);
   assert.equal(value.approvalStatus, 'demo_only');
@@ -359,4 +365,35 @@ test('a sequence stops at the first run that is not completed and audits why', a
   assert.ok(sequence.reason.startsWith('Sequence stopped at step 2 (asset-health): blocked'));
   assert.ok((await auditLog.all()).some((e) => e.action === 'agent.sequence_stopped'));
   await assert.rejects(() => rt.runSequence([]), /at least one task/);
+});
+
+test('a model-drafted report receives deterministic reference passages, cites them as evidence, and never receives passages above the classification ceiling', async () => {
+  const seen: string[] = [];
+  const model: ModelGateway = { generate: async (request) => { seen.push(request.messages[1]?.content ?? ''); return { text: 'Narrative (interpretation) citing [KB-DEMO-KPI-GUIDE/P1].', model: 'test' }; } };
+  const { rt } = runtime({ model, baseUrl: 'http://127.0.0.1:8080/v1' });
+  const record = await rt.run(task({ capability: 'monthly-report', actionMode: 'draft' }));
+  assert.equal(record.status, 'completed');
+  assert.equal(record.modelUsed, true);
+  assert.deepEqual(record.toolCalls.map((c) => c.toolId), ['contract.read', 'maximo.read', 'maximo.read', 'maximo.read', 'memory.read', 'knowledge.read']);
+  const value = record.output?.value as { citations: { ref: string; classification: string }[]; narrativeSource: string };
+  assert.equal(value.narrativeSource, 'model');
+  assert.ok(value.citations.length > 0);
+  assert.ok(value.citations.every((c) => c.classification === 'synthetic'));
+  assert.ok(!value.citations.some((c) => c.ref.startsWith('KB-DEMO-INTERNAL-NOTE')), 'internal documents are invisible to a synthetic deployment');
+  assert.ok(seen[0]?.includes('referencePassages'));
+  assert.ok(!seen[0]?.includes('classification gating'), 'the internal note text never reaches the model');
+  assert.ok(record.output?.evidence.some((e) => e.entityType === 'knowledge-passage'));
+  assert.ok(record.output?.assumptions.some((a) => /reference passage\(s\) were supplied to the model for wording only/.test(a)));
+
+  // Without a model no passages are retrieved: the deterministic summary needs none.
+  const plain = await runtime().rt.run(task({ capability: 'monthly-report', actionMode: 'draft' }));
+  assert.ok(!plain.toolCalls.some((c) => c.toolId === 'knowledge.read'));
+  assert.deepEqual((plain.output?.value as { citations: unknown[] }).citations, []);
+
+  // Without a knowledge port the handler skips retrieval instead of failing closed on an optional tool.
+  const memoryStore = new InMemoryMemoryStore();
+  const bare = buildStandardTools({ maximo: new MockMaximoReadPort({ assets: DEMO_ASSETS, workOrders: DEMO_WORK_ORDERS }), contract: new InMemoryContractReadPort([DEMO_CONTRACT_KPI_SET]), memory: memoryStore });
+  const noKnowledge = await runtime({ model, baseUrl: 'http://127.0.0.1:8080/v1', tools: bare }).rt.run(task({ capability: 'monthly-report', actionMode: 'draft' }));
+  assert.equal(noKnowledge.status, 'completed');
+  assert.deepEqual((noKnowledge.output?.value as { citations: unknown[] }).citations, []);
 });

@@ -2,6 +2,8 @@ import type { ConditionReadPort } from '../connectors/condition/port.ts';
 import type { ContractReadPort } from '../connectors/contract/port.ts';
 import type { MaximoReadPort } from '../connectors/maximo/port.ts';
 import type { MemoryKind, MemoryStore } from './memory.ts';
+import type { DataClassification } from './contracts.ts';
+import type { KnowledgeReadPort } from '../knowledge/contracts.ts';
 import { ToolRegistry } from './tools.ts';
 
 /**
@@ -20,12 +22,16 @@ export interface ContractReadInput { contractId: string; /** 'kpiSet' (default) 
 export interface FinanceReadInput { contractId: string; since?: string }
 export interface MemoryReadInput { taskId?: string; kind?: MemoryKind }
 export type ConditionReadInput = { kind: 'profile'; assetId: string } | { kind: 'assetIds' };
+export interface KnowledgeReadInput { query: string; contractId?: string; tags?: readonly string[]; limit?: number }
 
 export interface StandardToolPorts {
   maximo?: MaximoReadPort;
   contract?: ContractReadPort;
   condition?: ConditionReadPort;
   memory?: MemoryStore;
+  knowledge?: KnowledgeReadPort;
+  /** Classification ceiling for knowledge retrieval: the deployment's data classification. Defaults to synthetic. */
+  classification?: DataClassification;
 }
 
 export function buildStandardTools(ports: StandardToolPorts): ToolRegistry {
@@ -83,6 +89,17 @@ export function buildStandardTools(ports: StandardToolPorts): ToolRegistry {
       readOnly: true,
       summarise: (input) => `memory ${input.taskId ? `task ${input.taskId}` : `kind ${input.kind ?? 'decision'}`}`,
       invoke: async (input) => (input.taskId ? memory.byTask(input.taskId) : memory.byKind(input.kind ?? 'decision')),
+    });
+  }
+  const knowledge = ports.knowledge;
+  if (knowledge) {
+    const ceiling = ports.classification ?? 'synthetic';
+    registry.register<KnowledgeReadInput, unknown>({
+      id: 'knowledge.read',
+      description: 'Deterministic retrieval of reference passages (procedures, definition guides, clause notes) within the deployment classification.',
+      readOnly: true,
+      summarise: (input) => `knowledge "${input.query.slice(0, 60)}"${input.contractId ? ` contract ${input.contractId}` : ''} <= ${ceiling}`,
+      invoke: async (input) => knowledge.search({ query: input.query, contractId: input.contractId, tags: input.tags, limit: input.limit, maxClassification: ceiling }),
     });
   }
   return registry;

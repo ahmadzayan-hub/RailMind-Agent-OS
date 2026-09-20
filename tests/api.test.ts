@@ -493,3 +493,28 @@ test('API review workflow: comment sheet, disagreement positions, named resoluti
     assert.equal((await call('GET', '/api/review?reportId=OTHER-2026-08', undefined, 'demo-engineer')).status, 403);
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await app.close(); }
 });
+
+test('API knowledge retrieval lists and searches within the deployment classification and contract scope', async () => {
+  const { composeApplication } = await import('../src/app/compose.ts');
+  const { loadConfig } = await import('../src/config.ts');
+  const app = await composeApplication(loadConfig({}), { now: () => '2026-09-09T12:00:00Z' });
+  const handler = createApiHandler(app.api);
+  const server = createServer(async (req, res) => { if (await handler(req, res)) return; res.writeHead(404); res.end(); });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const get = async (path: string, token: string) => { const response = await fetch(`${base}${path}`, { headers: { Authorization: `Bearer ${token}` } }); return { status: response.status, json: await response.json() as Record<string, any> }; };
+  try {
+    const list = await get('/api/knowledge', 'demo-viewer');
+    assert.equal(list.status, 200);
+    assert.equal(list.json.classification, 'synthetic');
+    assert.deepEqual(list.json.documents.map((d: { documentId: string }) => d.documentId), ['KB-DEMO-CONTRACT-NOTES', 'KB-DEMO-KPI-GUIDE', 'KB-DEMO-REVIEW-PROCEDURE']);
+    const hits = await get('/api/knowledge?query=MTTR%20repair%20clock&limit=2', 'demo-viewer');
+    assert.equal(hits.json.hits.length, 2);
+    assert.equal(hits.json.hits[0].evidence.entityId, 'KB-DEMO-KPI-GUIDE/P1');
+    const scoped = await get('/api/knowledge?query=clause%2012.2&contractId=DEMO-CONTRACT', 'demo-engineer');
+    assert.equal(scoped.json.hits[0].documentId, 'KB-DEMO-CONTRACT-NOTES');
+    assert.equal((await get('/api/knowledge?query=clause&contractId=DEMO-CONTRACT', 'demo-other-contract')).status, 403);
+    assert.equal((await get('/api/knowledge?query=x&limit=99', 'demo-viewer')).status, 400);
+    assert.equal((await fetch(`${base}/api/knowledge`)).status, 401);
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await app.close(); }
+});

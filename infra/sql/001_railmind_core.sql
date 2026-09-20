@@ -115,3 +115,15 @@ CREATE TABLE IF NOT EXISTS railmind_disagreements (
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS railmind_disagreements_report_idx ON railmind_disagreements (report_id);
+
+-- Private knowledge documents: classification per document, gated at read time.
+CREATE TABLE IF NOT EXISTS railmind_knowledge_documents (
+  document_id    TEXT PRIMARY KEY,
+  classification TEXT NOT NULL,
+  contract_ids   TEXT[] NOT NULL DEFAULT '{}',
+  tags           TEXT[] NOT NULL DEFAULT '{}',
+  version        TEXT NOT NULL,
+  document       JSONB NOT NULL,
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS railmind_knowledge_documents_classification_idx ON railmind_knowledge_documents (classification);
