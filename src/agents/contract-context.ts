@@ -1,5 +1,6 @@
 import type { EvidenceRef } from '../agent-os/contracts.ts';
 import type { CapabilityHandler, CapabilityResult } from '../agent-os/handlers.ts';
+import { ModelUnavailableError } from '../agent-os/model-guard.ts';
 import type { ContractReadInput } from '../agent-os/standard-tools.ts';
 import type { ContractKpiSet } from '../connectors/contract/port.ts';
 import type { GovernedKpiDefinition } from '../kpi/registry.ts';
@@ -88,7 +89,9 @@ export function createContractContextHandler(defaults: AnalysisScope): Capabilit
       const contractual = approvalStatus === 'approved' && kpiSet.definitions.every((d) => d.approvalStatus === 'approved');
       let interpretation: string | null = null;
       let modelUsed = false;
+      let modelFailure: string | null = null;
       if (context.model) {
+        try {
         const response = await context.model.generate({
           temperature: 0,
           maxTokens: 400,
@@ -99,6 +102,10 @@ export function createContractContextHandler(defaults: AnalysisScope): Capabilit
         });
         interpretation = response.text;
         modelUsed = true;
+        } catch (error) {
+          if (!(error instanceof ModelUnavailableError)) throw error;
+          modelFailure = error.message;
+        }
       }
       const evidence: EvidenceRef[] = [kpiSet.evidence];
       return {
@@ -120,6 +127,7 @@ export function createContractContextHandler(defaults: AnalysisScope): Capabilit
           contractual ? `Definition set ${kpiSet.definitionVersion} is approved and contractual.` : `Definition set ${kpiSet.definitionVersion} is ${approvalStatus}; it is NOT a contractual authority and must not be cited as one.`,
           'Every field is copied from the approved definition set; nothing is derived or redefined here.',
           ...(interpretation ? ['The interpretation text was drafted by a model and is not a source of contractual fact.'] : []),
+          ...(modelFailure ? [`Model unavailable (${modelFailure}); no interpretation was drafted. The definitions above are unaffected.`] : []),
         ],
         modelUsed,
       };

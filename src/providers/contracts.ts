@@ -90,6 +90,7 @@ export class SourceUnavailableError extends Error {
   readonly sourceSystem: SourceSystem;
   constructor(sourceSystem: SourceSystem, message: string) {
     super(message);
+    this.name = 'SourceUnavailableError';
     this.sourceSystem = sourceSystem;
   }
 }

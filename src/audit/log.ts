@@ -21,8 +21,13 @@ export type AuditAction =
   | 'agent.run_completed'
   | 'agent.run_failed'
   | 'tool.called'
+  | 'tool.retried'
   | 'model.invoked'
   | 'model.blocked'
+  | 'model.failed'
+  | 'agent.sequence_started'
+  | 'agent.sequence_completed'
+  | 'agent.sequence_stopped'
   | 'auth.denied'
   | 'proposal.created';
 
@@ -30,7 +35,7 @@ export interface AuditEventInput {
   action: AuditAction;
   actorId: string;
   actorRole?: string;
-  subjectType: 'report' | 'task' | 'proposal' | 'run' | 'principal';
+  subjectType: 'report' | 'task' | 'proposal' | 'run' | 'principal' | 'sequence';
   subjectId: string;
   at: string;
   fromState?: string;

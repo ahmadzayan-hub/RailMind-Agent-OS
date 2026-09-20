@@ -2,6 +2,7 @@ import type { CapabilityHandler, CapabilityResult } from '../agent-os/handlers.t
 import type { ContractReadInput, MemoryReadInput } from '../agent-os/standard-tools.ts';
 import type { ContractKpiSet } from '../connectors/contract/port.ts';
 import type { MemoryRecord } from '../agent-os/memory.ts';
+import { ModelUnavailableError } from '../agent-os/model-guard.ts';
 import { draftGroundedReportNarrative } from '../llm/report-narrative.ts';
 import type { ReportCadence, ReportException, ReportPackage } from '../reporting/contracts.ts';
 import { buildReportPackage, deterministicExecutiveSummary } from '../reporting/generator.ts';
@@ -16,7 +17,7 @@ import { resolveScope, type AnalysisScope } from './scope.ts';
 export interface ReportingValue {
   report: ReportPackage;
   narrative: string;
-  narrativeSource: 'model' | 'deterministic';
+  narrativeSource: 'model' | 'deterministic' | 'deterministic_fallback';
 }
 
 function reportIdFor(cadence: ReportCadence, scope: AnalysisScope): string {
@@ -42,16 +43,25 @@ export function createReportingHandler(cadence: ReportCadence, defaults: Analysi
       let narrative = deterministicExecutiveSummary(report);
       let narrativeSource: ReportingValue['narrativeSource'] = 'deterministic';
       let modelUsed = false;
+      let modelFailure: string | null = null;
       if (context.model) {
-        narrative = await draftGroundedReportNarrative(report, context.model);
-        narrativeSource = 'model';
-        modelUsed = true;
+        try {
+          narrative = await draftGroundedReportNarrative(report, context.model);
+          narrativeSource = 'model';
+          modelUsed = true;
+        } catch (error) {
+          if (!(error instanceof ModelUnavailableError)) throw error;
+          modelFailure = error.message;
+          narrativeSource = 'deterministic_fallback';
+        }
       }
       return {
         value: { report: { ...report, narrativeDraft: narrative }, narrative, narrativeSource },
         evidence: pack.evidence,
         assumptions: [
-          narrativeSource === 'model' ? 'Narrative drafted by a model from the package facts only; interpretation is labelled as such and requires review.' : 'No model was granted; narrative is the deterministic executive summary.',
+          narrativeSource === 'model' ? 'Narrative drafted by a model from the package facts only; interpretation is labelled as such and requires review.'
+            : narrativeSource === 'deterministic_fallback' ? `Model unavailable (${modelFailure}); narrative is the deterministic executive summary. Facts are unaffected.`
+            : 'No model was granted; narrative is the deterministic executive summary.',
           `${priorDecisions.length} prior decision record(s) were available in memory for context.`,
         ],
         modelUsed,

@@ -252,3 +252,48 @@ test('API serves the synthetic portfolio DTO to scoped principals only', async (
     assert.equal(anonymous.status, 401);
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await app.close(); }
 });
+
+test('API runs a declared sequence with per-task permission checks and rejects malformed lists', async () => {
+  const { composeApplication } = await import('../src/app/compose.ts');
+  const { loadConfig } = await import('../src/config.ts');
+  const app = await composeApplication(loadConfig({}), { now: () => '2026-09-09T12:00:00Z' });
+  const handler = createApiHandler(app.api);
+  const server = createServer(async (req, res) => { if (await handler(req, res)) return; res.writeHead(404); res.end(); });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const post = async (token: string, body: unknown) => { const response = await fetch(`${base}/api/agent/sequence`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(body) }); return { status: response.status, json: await response.json() as Record<string, any> }; };
+  try {
+    const steps = [
+      { capability: 'data-quality', goal: 'quality', riskClass: 'operational', actionMode: 'analyse' },
+      { capability: 'maintenance-kpi', goal: 'KPIs', riskClass: 'operational', actionMode: 'analyse' },
+      { capability: 'exception-analysis', goal: 'exceptions', riskClass: 'operational', actionMode: 'analyse' },
+    ];
+    const ok = await post('demo-engineer', { tasks: steps });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.json.status, 'completed');
+    assert.equal(ok.json.runs.length, 3);
+    assert.ok(ok.json.runs.every((r: { sequenceId: string; task: { actorId: string } }) => r.sequenceId === ok.json.sequenceId && r.task.actorId === 'demo.engineer'));
+
+    const viewer = await post('demo-viewer', { tasks: steps });
+    assert.equal(viewer.status, 403);
+    const outOfScope = await post('demo-other-contract', { tasks: steps });
+    assert.equal(outOfScope.status, 403);
+    const mixed = await post('demo-reliability', { tasks: [steps[0], { capability: 'monthly-report', goal: 'x', riskClass: 'contractual', actionMode: 'draft' }] });
+    assert.equal(mixed.status, 403, 'every task in the list is permission-checked before any run starts');
+    const runs = await (await fetch(`${base}/api/runs`, { headers: { Authorization: 'Bearer demo-engineer' } })).json() as { runs: unknown[] };
+    assert.equal(runs.runs.length, 3, 'a refused sequence never starts a run');
+
+    assert.equal((await post('demo-engineer', { tasks: [] })).status, 400);
+    assert.equal((await post('demo-engineer', { tasks: 'maintenance-kpi' })).status, 400);
+    assert.equal((await post('demo-engineer', { tasks: [1] })).status, 400);
+    assert.equal((await post('demo-engineer', { tasks: Array.from({ length: 9 }, () => steps[0]) })).status, 400);
+
+    const stopped = await post('demo-engineer', { tasks: [steps[0], { capability: 'asset-health', goal: 'x', riskClass: 'operational', actionMode: 'control' }] });
+    assert.equal(stopped.status, 422);
+    assert.equal(stopped.json.status, 'stopped');
+    assert.equal(stopped.json.stoppedAt, 1);
+    const audit = await (await fetch(`${base}/api/audit`, { headers: { Authorization: 'Bearer demo-engineer' } })).json() as { chain: { valid: boolean }; events: { action: string }[] };
+    assert.equal(audit.chain.valid, true);
+    assert.ok(audit.events.some((e) => e.action === 'agent.sequence_stopped'));
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await app.close(); }
+});
