@@ -1,4 +1,4 @@
-# Project 44 — RailMind Agent OS
+# Project 44: RailMind Agent OS
 
 Canonical implementation repository for an open-source, evidence-first rail asset and contract intelligence platform.
 
