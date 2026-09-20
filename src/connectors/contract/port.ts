@@ -1,5 +1,6 @@
 import type { EvidenceRef } from '../../agent-os/contracts.ts';
 import type { GovernedKpiDefinition } from '../../kpi/registry.ts';
+import type { ContractTwin } from '../../contract-twin/contracts.ts';
 
 /**
  * Contract context port. Approved contract documents remain authoritative;
@@ -22,16 +23,24 @@ export interface ContractKpiSet {
 
 export interface ContractReadPort {
   getKpiSet(contractId: string): Promise<ContractKpiSet | null>;
+  /** The contract digital twin (obligations, reporting duties, evidence rules), when the repository publishes one. Read-only. */
+  getTwin(contractId: string): Promise<ContractTwin | null>;
 }
 
 export class InMemoryContractReadPort implements ContractReadPort {
   readonly #sets: Map<string, ContractKpiSet>;
+  readonly #twins: Map<string, ContractTwin>;
 
-  constructor(sets: readonly ContractKpiSet[]) {
+  constructor(sets: readonly ContractKpiSet[], twins: readonly ContractTwin[] = []) {
     this.#sets = new Map(sets.map((set) => [set.contractId, set]));
+    this.#twins = new Map(twins.map((twin) => [twin.contractId, twin]));
   }
 
   async getKpiSet(contractId: string): Promise<ContractKpiSet | null> {
     return this.#sets.get(contractId) ?? null;
+  }
+
+  async getTwin(contractId: string): Promise<ContractTwin | null> {
+    return this.#twins.get(contractId) ?? null;
   }
 }

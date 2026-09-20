@@ -16,7 +16,7 @@ export type MaximoReadInput =
   | { kind: 'meters'; assetId: string; since?: string }
   | { kind: 'invoices'; contractId: string; since?: string };
 
-export interface ContractReadInput { contractId: string }
+export interface ContractReadInput { contractId: string; /** 'kpiSet' (default) or the contract digital twin. */ kind?: 'kpiSet' | 'twin' }
 export interface FinanceReadInput { contractId: string; since?: string }
 export interface MemoryReadInput { taskId?: string; kind?: MemoryKind }
 export type ConditionReadInput = { kind: 'profile'; assetId: string } | { kind: 'assetIds' };
@@ -59,10 +59,10 @@ export function buildStandardTools(ports: StandardToolPorts): ToolRegistry {
   if (contract) {
     registry.register<ContractReadInput, unknown>({
       id: 'contract.read',
-      description: 'Approved contract KPI definitions, thresholds, scope and evidence rules.',
+      description: 'Approved contract KPI definitions, thresholds, scope and evidence rules; or the contract digital twin (obligations, reporting duties).',
       readOnly: true,
-      summarise: (input) => `kpi-set ${input.contractId}`,
-      invoke: async (input) => contract.getKpiSet(input.contractId),
+      summarise: (input) => `${input.kind === 'twin' ? 'twin' : 'kpi-set'} ${input.contractId}`,
+      invoke: async (input) => (input.kind === 'twin' ? contract.getTwin(input.contractId) : contract.getKpiSet(input.contractId)),
     });
   }
   const condition = ports.condition;

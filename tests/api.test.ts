@@ -396,3 +396,29 @@ test('API serves the GIS view per report within scope and fails closed without a
     assert.equal((await fetch(`${base}/api/gis`)).status, 401);
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await app.close(); }
 });
+
+test('API evaluates the contract digital twin per report within scope', async () => {
+  const { composeApplication } = await import('../src/app/compose.ts');
+  const { loadConfig } = await import('../src/config.ts');
+  const app = await composeApplication(loadConfig({}), { now: () => '2026-09-12T12:00:00Z' });
+  const handler = createApiHandler(app.api);
+  const server = createServer(async (req, res) => { if (await handler(req, res)) return; res.writeHead(404); res.end(); });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const get = async (path: string, token: string) => { const response = await fetch(`${base}${path}`, { headers: { Authorization: `Bearer ${token}` } }); return { status: response.status, json: await response.json() as Record<string, any> }; };
+  try {
+    const twin = await get('/api/contract-twin', 'demo-viewer');
+    assert.equal(twin.status, 200);
+    assert.equal(twin.json.contractual, false);
+    assert.equal(twin.json.period.reportId, 'DEMO-2026-08');
+    assert.equal(twin.json.evaluatedAt, '2026-09-12T12:00:00Z');
+    assert.equal(twin.json.reportingDuties.find((d: { dutyId: string }) => d.dutyId === 'DUTY-MONTHLY').status, 'overdue', 'the monthly package is still draft two days after its demo due date');
+    assert.ok(twin.json.obligations.every((o: { status: string }) => ['met', 'breached', 'not_decision_grade', 'unavailable', 'not_effective', 'not_evaluated'].includes(o.status)));
+    const quarterly = await get('/api/contract-twin?reportId=DEMO-2026-Q3', 'demo-engineer');
+    assert.equal(quarterly.json.period.cadence, 'quarterly');
+    assert.equal(quarterly.json.reportingDuties.find((d: { dutyId: string }) => d.dutyId === 'DUTY-QUARTERLY').reportId, 'DEMO-2026-Q3');
+    assert.equal((await get('/api/contract-twin?reportId=OTHER-2026-08', 'demo-other-contract')).status, 404, 'no twin is published for the second demo contract');
+    assert.equal((await get('/api/contract-twin?reportId=OTHER-2026-08', 'demo-engineer')).status, 403);
+    assert.equal((await fetch(`${base}/api/contract-twin`)).status, 401);
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await app.close(); }
+});

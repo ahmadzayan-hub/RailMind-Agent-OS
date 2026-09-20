@@ -9,7 +9,7 @@
     "build": "tsc -p tsconfig.build.json",
     "build:web-data": "node --experimental-strip-types scripts/build-web-data.mjs",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
-    "check:web": "node --check web/app.js && node --check web/data/demo-pack.js && node --check web/data/gis-pack.js",
+    "check:web": "node --check web/app.js && node --check web/data/demo-pack.js && node --check web/data/gis-pack.js && node --check web/data/contract-twin-pack.js",
     "check:web-data": "node --experimental-strip-types scripts/check-web-data.mjs",
     "check:portfolio": "node scripts/check-portfolio.mjs",
     "check:package": "npm run build && node scripts/package-smoke.mjs",

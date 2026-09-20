@@ -72,3 +72,4 @@ html[dir=ltr] .gis-panel--layers{border-inline-end:1px solid #dbe8ef}html[dir=lt
 .approval-record b.ok{color:var(--green)}.approval-record b.warn{color:var(--amber)}.approval-record.warn{color:var(--red)}
 /* Exception centre rows drill down to the same evidence drawer as the decision queue. */
 .table-evidence{margin-top:10px;width:auto}
+.twin-panel{margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}.twin-panel .panel-heading{align-items:flex-start}.twin-table .audit-row{grid-template-columns:2.2fr .9fr 1fr 1.3fr 2fr;align-items:start}.twin-table--duties .audit-row{grid-template-columns:2fr 1fr 1fr 2.4fr}.twin-table .audit-row span{white-space:normal}@media(max-width:820px){.twin-table .audit-row,.twin-table--duties .audit-row{grid-template-columns:1fr}}

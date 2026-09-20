@@ -18,7 +18,7 @@ import type { MaximoP0Port } from '../src/connectors/maximo/port.ts';
 import { InMemoryConditionReadPort } from '../src/connectors/condition/port.ts';
 import { InMemoryContractReadPort } from '../src/connectors/contract/port.ts';
 import { MockMaximoReadPort } from '../src/connectors/maximo/mock.ts';
-import { DEMO_ASSETS, DEMO_CONDITION_PROFILES, DEMO_CONTRACT_KPI_SET, DEMO_INVOICES, DEMO_PM_RECORDS, DEMO_SCOPE, DEMO_WORK_ORDERS } from '../src/demo.ts';
+import { DEMO_ASSETS, DEMO_CONDITION_PROFILES, DEMO_CONTRACT_KPI_SET, DEMO_CONTRACT_TWIN, DEMO_INVOICES, DEMO_PM_RECORDS, DEMO_SCOPE, DEMO_WORK_ORDERS } from '../src/demo.ts';
 
 function task(overrides: Partial<AgentTask> = {}): AgentTask {
   return { taskId: 'T-1', actorId: 'engineer-1', goal: 'demo', capability: 'maintenance-kpi', riskClass: 'operational', actionMode: 'analyse', requestedAt: '2026-09-09T10:00:00Z', ...overrides };
@@ -31,7 +31,7 @@ function runtime(options: { handlers?: readonly CapabilityHandler[]; model?: Mod
   const memoryStore = new InMemoryMemoryStore();
   const ledger = new InMemoryDecisionLedger();
   const maximo = options.maximo ?? new MockMaximoReadPort({ assets: DEMO_ASSETS, workOrders: DEMO_WORK_ORDERS, preventiveMaintenance: DEMO_PM_RECORDS, invoices: DEMO_INVOICES });
-  const tools = options.tools ?? buildStandardTools({ maximo, contract: new InMemoryContractReadPort([DEMO_CONTRACT_KPI_SET]), condition: new InMemoryConditionReadPort(DEMO_CONDITION_PROFILES), memory: memoryStore });
+  const tools = options.tools ?? buildStandardTools({ maximo, contract: new InMemoryContractReadPort([DEMO_CONTRACT_KPI_SET], [DEMO_CONTRACT_TWIN]), condition: new InMemoryConditionReadPort(DEMO_CONDITION_PROFILES), memory: memoryStore });
   let tick = 0;
   const rt = new AgentRuntime({ catalog: AGENT_CATALOG, tools, handlers: options.handlers ?? createStandardHandlers(DEMO_SCOPE), auditLog, memoryStore, ledger, modelGateway: options.model ?? null, modelPolicy: { baseUrl: options.baseUrl ?? null, remoteApprovedForInternal: false, remoteApprovedForConfidential: false }, retry: options.retry ?? NO_WAIT, now: () => new Date(Date.parse('2026-09-09T10:00:00Z') + (tick++) * 1000).toISOString() });
   return { rt, auditLog, memoryStore, ledger };
@@ -222,8 +222,8 @@ test('contract context copies the approved definition set through contract.read 
   assert.equal(record.approvalRequired, true, 'the kernel escalates contract context to contractual, so approval is required');
   assert.equal(record.releaseReady, false);
   assert.equal(record.modelUsed, false);
-  assert.deepEqual(record.toolCalls.map((c) => c.toolId), ['contract.read']);
-  const value = record.output?.value as { contractual: boolean; approvalStatus: string; definitions: { id: string; threshold: number | null; clauseRef: string | null; approvalStatus: string }[]; notEffective: string[]; plannedServiceMinutes: number; assetIds: string[] };
+  assert.deepEqual(record.toolCalls.map((c) => [c.toolId, c.summary]), [['contract.read', 'kpi-set DEMO-CONTRACT'], ['contract.read', 'twin DEMO-CONTRACT']]);
+  const value = record.output?.value as { twin: { twinVersion: string; approvalStatus: string; contractual: boolean; obligations: unknown[]; reportingDuties: unknown[]; unboundKpiIds: string[] } | null; contractual: boolean; approvalStatus: string; definitions: { id: string; threshold: number | null; clauseRef: string | null; approvalStatus: string }[]; notEffective: string[]; plannedServiceMinutes: number; assetIds: string[] };
   assert.equal(value.contractual, false);
   assert.equal(value.approvalStatus, 'demo_only');
   assert.deepEqual(value.definitions.map((d) => d.id), ['availability', 'failures', 'mtbf', 'mttr', 'backlog', 'pm_compliance']);
@@ -234,6 +234,15 @@ test('contract context copies the approved definition set through contract.read 
   assert.equal(value.assetIds.length, 3);
   assert.equal(record.output?.evidence[0]?.sourceSystem, 'contract_repository');
   assert.ok(record.output?.assumptions.some((a) => /NOT a contractual authority/.test(a)));
+  // The digital twin is copied, never redefined, and a demo twin is labelled as such.
+  assert.equal(value.twin?.twinVersion, 'demo-twin-v1');
+  assert.equal(value.twin?.approvalStatus, 'demo_only');
+  assert.equal(value.twin?.contractual, false);
+  assert.equal(value.twin?.obligations.length, DEMO_CONTRACT_TWIN.obligations.length);
+  assert.equal(value.twin?.reportingDuties.length, 2);
+  assert.deepEqual(value.twin?.unboundKpiIds, []);
+  assert.equal(record.output?.evidence[1]?.entityType, 'contract-twin');
+  assert.ok(record.output?.assumptions.some((a) => /Contract twin demo-twin-v1 is demo_only and is NOT a contractual authority/.test(a)));
 });
 
 test('finance context reads invoices through finance.read only, flags disputes and takes no financial action', async () => {

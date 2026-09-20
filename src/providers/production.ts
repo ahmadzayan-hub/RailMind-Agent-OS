@@ -56,6 +56,10 @@ export function createContractRepositoryProvider(port: ContractReadPort, options
       const set = await guarded('contract_repository', `kpi set ${contractId}`, () => port.getKpiSet(contractId));
       return set ? withProvenance(set, 'kpi-definition-set', `${set.contractId}/${set.definitionVersion}`, set.evidence.observedAt, 'contract_repository', now) : null;
     },
+    async getTwin(contractId) {
+      const twin = await guarded('contract_repository', `twin ${contractId}`, () => port.getTwin(contractId));
+      return twin ? withProvenance(twin, 'contract-twin', `${twin.contractId}/${twin.twinVersion}`, twin.evidence.observedAt, 'contract_repository', now) : null;
+    },
   };
 }
 

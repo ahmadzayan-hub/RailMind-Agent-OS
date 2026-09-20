@@ -57,3 +57,6 @@ export * from './gis/contracts.ts';
 export * from './gis/demo-schematic.ts';
 export * from './gis/service.ts';
 export * from './web/gis-pack.ts';
+export * from './contract-twin/contracts.ts';
+export * from './contract-twin/service.ts';
+export * from './web/contract-twin-pack.ts';

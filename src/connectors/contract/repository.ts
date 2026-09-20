@@ -1,6 +1,7 @@
 import type { EvidenceRef } from '../../agent-os/contracts.ts';
 import { validateDefinition, type GovernedKpiDefinition } from '../../kpi/registry.ts';
 import { InMemoryContractReadPort, type ContractKpiSet, type ContractReadPort } from './port.ts';
+import { validateTwin, type ContractTwin } from '../../contract-twin/contracts.ts';
 
 /**
  * Contract repository document adapter.
@@ -25,9 +26,16 @@ export interface ContractRepositorySetDocument {
   source: { uri?: string; observedAt: string; snapshotHash?: string };
 }
 
+/** A twin as the repository exports it: the twin fields plus where it came from. */
+export interface ContractRepositoryTwinDocument extends Omit<ContractTwin, 'evidence'> {
+  source: { uri?: string; observedAt: string; snapshotHash?: string };
+}
+
 export interface ContractRepositoryDocument {
   schema: typeof CONTRACT_REPOSITORY_SCHEMA;
   sets: readonly ContractRepositorySetDocument[];
+  /** Optional contract digital twins, one per contract. */
+  twins?: readonly ContractRepositoryTwinDocument[];
 }
 
 export class ContractRepositoryDocumentError extends Error {}
@@ -91,9 +99,36 @@ export function parseContractRepositoryDocument(json: unknown): readonly Contrac
   });
 }
 
+/** Parses and validates the optional twins of a repository document. */
+export function parseContractRepositoryTwins(json: unknown): readonly ContractTwin[] {
+  if (!isObject(json) || json.twins === undefined) return [];
+  if (!Array.isArray(json.twins)) throw new ContractRepositoryDocumentError('Contract repository twins must be a list.');
+  const seen = new Set<string>();
+  return json.twins.map((raw, index) => {
+    const where = `twin[${index}]`;
+    if (!isObject(raw)) throw new ContractRepositoryDocumentError(`${where} must be an object.`);
+    const source = raw.source;
+    if (!isObject(source) || typeof source.observedAt !== 'string' || Number.isNaN(Date.parse(source.observedAt))) throw new ContractRepositoryDocumentError(`${where}: source.observedAt must be a timestamp.`);
+    const { source: _source, ...rest } = raw;
+    const contractId = typeof rest.contractId === 'string' ? rest.contractId : '?';
+    const twin: ContractTwin = {
+      ...(rest as unknown as Omit<ContractTwin, 'evidence'>),
+      obligations: Array.isArray(rest.obligations) ? rest.obligations as ContractTwin['obligations'] : [],
+      reportingDuties: Array.isArray(rest.reportingDuties) ? rest.reportingDuties as ContractTwin['reportingDuties'] : [],
+      evidence: { sourceSystem: 'contract_repository', entityType: 'contract-twin', entityId: `${contractId}/${String(rest.twinVersion)}`, observedAt: source.observedAt, sourceUri: typeof source.uri === 'string' ? source.uri : undefined, snapshotHash: typeof source.snapshotHash === 'string' ? source.snapshotHash : undefined },
+    };
+    const problems = validateTwin(twin);
+    if (problems.length > 0) throw new ContractRepositoryDocumentError(`${where} (${contractId}): ${problems.join('; ')}.`);
+    if (seen.has(twin.contractId)) throw new ContractRepositoryDocumentError(`Duplicate twin for contract ${twin.contractId}.`);
+    seen.add(twin.contractId);
+    return twin;
+  });
+}
+
 /** Read port over a parsed repository document. */
-export function createDocumentContractReadPort(json: unknown): ContractReadPort & { readonly sets: readonly ContractKpiSet[] } {
+export function createDocumentContractReadPort(json: unknown): ContractReadPort & { readonly sets: readonly ContractKpiSet[]; readonly twins: readonly ContractTwin[] } {
   const sets = parseContractRepositoryDocument(json);
-  const port = new InMemoryContractReadPort(sets);
-  return { sets, getKpiSet: (contractId) => port.getKpiSet(contractId) };
+  const twins = parseContractRepositoryTwins(json);
+  const port = new InMemoryContractReadPort(sets, twins);
+  return { sets, twins, getKpiSet: (contractId) => port.getKpiSet(contractId), getTwin: (contractId) => port.getTwin(contractId) };
 }

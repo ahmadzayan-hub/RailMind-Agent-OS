@@ -3,6 +3,7 @@ import type { CapabilityHandler, CapabilityResult } from '../agent-os/handlers.t
 import { ModelUnavailableError } from '../agent-os/model-guard.ts';
 import type { ContractReadInput } from '../agent-os/standard-tools.ts';
 import type { ContractKpiSet } from '../connectors/contract/port.ts';
+import type { ContractTwin } from '../contract-twin/contracts.ts';
 import type { GovernedKpiDefinition } from '../kpi/registry.ts';
 import { resolveScope, type AnalysisScope } from './scope.ts';
 
@@ -51,6 +52,19 @@ export interface ContractContextValue {
   notEffective: readonly string[];
   /** Plain-language interpretation from a model, when one was granted. Never a fact source. */
   interpretation: string | null;
+  /** The contract digital twin, copied from the repository when it publishes one. */
+  twin: {
+    twinVersion: string;
+    approvalStatus: ContractTwin['approvalStatus'];
+    contractual: boolean;
+    title: string;
+    parties: ContractTwin['parties'];
+    term: ContractTwin['term'];
+    obligations: ContractTwin['obligations'];
+    reportingDuties: ContractTwin['reportingDuties'];
+    /** Obligations binding KPIs that are not in the definition set. */
+    unboundKpiIds: readonly string[];
+  } | null;
 }
 
 export function summariseDefinition(definition: GovernedKpiDefinition): ContractDefinitionSummary {
@@ -87,6 +101,19 @@ export function createContractContextHandler(defaults: AnalysisScope): Capabilit
       const definitions = kpiSet.definitions.map(summariseDefinition);
       const notEffective = kpiSet.definitions.filter((d) => d.effectiveFrom > scope.periodStart || (d.effectiveTo !== undefined && d.effectiveTo < scope.periodEnd)).map((d) => d.id);
       const contractual = approvalStatus === 'approved' && kpiSet.definitions.every((d) => d.approvalStatus === 'approved');
+      const twinRecord = await context.tools.call<ContractReadInput, ContractTwin | null>('contract.read', { contractId: scope.contractId, kind: 'twin' });
+      const definitionIds = new Set(kpiSet.definitions.map((d) => d.id));
+      const twin: ContractContextValue['twin'] = twinRecord ? {
+        twinVersion: twinRecord.twinVersion,
+        approvalStatus: twinRecord.approvalStatus,
+        contractual: twinRecord.approvalStatus === 'approved',
+        title: twinRecord.title,
+        parties: twinRecord.parties,
+        term: twinRecord.term,
+        obligations: twinRecord.obligations,
+        reportingDuties: twinRecord.reportingDuties,
+        unboundKpiIds: [...new Set(twinRecord.obligations.flatMap((o) => o.kpiIds ?? []).filter((id) => !definitionIds.has(id)))],
+      } : null;
       let interpretation: string | null = null;
       let modelUsed = false;
       let modelFailure: string | null = null;
@@ -107,7 +134,7 @@ export function createContractContextHandler(defaults: AnalysisScope): Capabilit
           modelFailure = error.message;
         }
       }
-      const evidence: EvidenceRef[] = [kpiSet.evidence];
+      const evidence: EvidenceRef[] = twinRecord ? [kpiSet.evidence, twinRecord.evidence] : [kpiSet.evidence];
       return {
         value: {
           contractId: scope.contractId,
@@ -121,11 +148,14 @@ export function createContractContextHandler(defaults: AnalysisScope): Capabilit
           definitions,
           notEffective,
           interpretation,
+          twin,
         },
         evidence,
         assumptions: [
           contractual ? `Definition set ${kpiSet.definitionVersion} is approved and contractual.` : `Definition set ${kpiSet.definitionVersion} is ${approvalStatus}; it is NOT a contractual authority and must not be cited as one.`,
           'Every field is copied from the approved definition set; nothing is derived or redefined here.',
+          twin ? `Contract twin ${twin.twinVersion} is ${twin.approvalStatus}${twin.contractual ? '' : ' and is NOT a contractual authority'}; ${twin.obligations.length} obligation(s) and ${twin.reportingDuties.length} reporting dut(y/ies) copied without change.` : 'The contract repository publishes no digital twin for this contract; obligations and reporting duties are unavailable.',
+          ...(twin && twin.unboundKpiIds.length > 0 ? [`Twin obligations bind KPI(s) ${twin.unboundKpiIds.join(', ')} that are not in the approved definition set.`] : []),
           ...(interpretation ? ['The interpretation text was drafted by a model and is not a source of contractual fact.'] : []),
           ...(modelFailure ? [`Model unavailable (${modelFailure}); no interpretation was drafted. The definitions above are unaffected.`] : []),
         ],
