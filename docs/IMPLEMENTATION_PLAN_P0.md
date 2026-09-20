@@ -1,6 +1,6 @@
 # Implementation plan: P0 hardening (Phases 0 to 8)
 
-Date: 2026-09-09. Scope agreed: execute Phases 0 to 8 of the transformation brief, then pause for independent review before the contract digital twin and RMD modules (Phases 12 to 15).
+Date: 2026-09-09. Scope agreed: execute Phases 0 to 8 of the transformation brief, then pause for independent review before the contract digital twin and RMD modules (Phases 12 to 15). Update 2026-09-20: the owner instructed completion; Phases 11 to 15 were implemented on synthetic data with the same governance rules and are listed below.
 
 ## Audit of the current state against the brief
 
@@ -47,7 +47,10 @@ After each phase: typecheck, targeted tests, full `npm run verify`. At the end: 
 | 8 | Done | `src/kpi/registry.ts`, governed demo definitions, readiness per definition |
 | 9 | Done | `src/forecast/budget-forecast.ts` v2, `tests/budget-forecast.test.ts` (completed-record exclusion regression, confidence, funding gap, backtest, drift) |
 | 10 | Done | `src/portfolio/*`, `/api/portfolio`, `web/portfolio.js` + synthetic pack, classification guard, retired fingerprints blocked |
-| 11 to 15 | Not started | Paused for independent review, as agreed |
+| 11 | Done (2026-09-20) | `src/gis/*`, `GET /api/gis`, `web/data/gis-pack.js`, `tests/gis.test.ts`; production fails closed without a schematic adapter |
+| 12 | Done (2026-09-20) | `src/contract-twin/*`, twins in the repository export, `GET /api/contract-twin`, `web/data/contract-twin-pack.js`, `tests/contract-twin.test.ts` |
+| 13 and 14 | Done (2026-09-20) | `src/review/*`, review routes, approval held by open disagreements, ledger lineage, `tests/review.test.ts`, API test |
+| 15 | Done (2026-09-20) | `src/knowledge/*`, `knowledge.read`, `PgKnowledgeStore`, `GET /api/knowledge`, `tests/knowledge.test.ts`, orchestrator citation test |
 | 16 | Partly | CI active; branch protection documented in `BRANCH_GOVERNANCE.md`, to be configured on GitHub |
 | 17 | Done for 0 to 8 | README, SECURITY, DEPLOYMENT, status, OpenAPI, CLAUDE.md updated; full Apache-2.0 licence text |
-| 18 | Partly | Security bypass, RBAC denial, cross-scope, missing and stale evidence, duplicates, conflicts, formula version changes, approval invalidation, Maximo 401/403/500, source unavailable, database unavailable (live test skipped without DATABASE_URL) covered; LLM unavailable and forecast tests pending |
+| 18 | Partly | Security bypass, RBAC denial, cross-scope, missing and stale evidence, duplicates, conflicts, formula version changes, approval invalidation, Maximo 401/403/500, source unavailable, database unavailable (live test skipped without DATABASE_URL) covered; LLM unavailable (deterministic fallback, audited) and forecast tests pending |

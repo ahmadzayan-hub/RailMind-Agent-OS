@@ -26,7 +26,7 @@ Run an OpenAI-compatible local inference endpoint using an open-source runtime s
 
 `RAILMIND_MODE=demo` (default) runs the synthetic provider and the public demo identities. `RAILMIND_MODE=production` requires `RAILMIND_USERS`, `DATABASE_URL`, `MAXIMO_BASE_URL`, `CONDITION_BASE_URL`, `CONTRACT_REPOSITORY_PATH` and the reporting scope (`RAILMIND_CONTRACT_ID`, `RAILMIND_PERIOD_START`, `RAILMIND_PERIOD_END`). The server names every missing item in one error, refuses to start, and never substitutes synthetic data. Three read-only adapters exist: the Maximo REST client (GET only), the condition-monitoring REST client (GET only; `GET /assets` and `GET /assets/{id}/profile`), and the contract repository document adapter. The document is a JSON export with schema `railmind.contract-kpi-sets/1`; the host reads the file, the domain validates every definition with the KPI authority rules, and a set that is not `approved` stops start-up. The seed report package for the configured scope is built through the governed pipeline at start and refreshed on every read.
 
-What production mode still does not have: enterprise SSO (the token directory is the interface), approved RTA KPI definitions (the demo set is `demo_only` and is refused), and Maximo object-structure mappings confirmed against a live tenant. None of these are code gaps; they are owner-environment inputs.
+What production mode still does not have: enterprise SSO (the token directory is the interface), approved RTA KPI definitions and contract twins (the demo set and twin are `demo_only` and are refused), Maximo object-structure mappings confirmed against a live tenant, a GIS schematic adapter (`/api/gis` answers 503) and a knowledge corpus (documents are loaded into `railmind_knowledge_documents`; nothing is loaded by default). None of these are code gaps; they are owner-environment inputs. The repository export may carry `twins` next to `sets`; every twin must be `approved` in production.
 
 ## Containers
 
@@ -34,7 +34,7 @@ What production mode still does not have: enterprise SSO (the token directory is
 
 ## Database
 
-`infra/docker-compose.yml` starts PostgreSQL 16 with pgvector. It is optional for the static preview. When `DATABASE_URL` is set, `server.mjs` switches the audit log, memory store and report state to the PostgreSQL adapters and applies `infra/sql/001_railmind_core.sql` on start. The optional `pg` driver is installed by `npm ci`; without it the server reports a clear error instead of falling back silently.
+`infra/docker-compose.yml` starts PostgreSQL 16 with pgvector. It is optional for the static preview. When `DATABASE_URL` is set, `server.mjs` switches the audit log, memory store, report state, decision ledger, run records, review comments, disagreements and knowledge documents to the PostgreSQL adapters and applies `infra/sql/001_railmind_core.sql` on start. The optional `pg` driver is installed by `npm ci`; without it the server reports a clear error instead of falling back silently.
 
 Audit rows are append-only at database level (trigger on `railmind_audit_events`). Appends are serialised with a transaction-scoped advisory lock so the hash chain stays linear under concurrent writers.
 

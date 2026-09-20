@@ -58,6 +58,16 @@ The existing `RailMind` repository is treated as the asset-intelligence referenc
 - local decision API: governed agent runs, report transitions, audited agent planning, audit trail and chain verification over HTTP; the browser approval gate, asset intelligence and agent workspace are interactive
 - PostgreSQL adapters for the audit log, memory store and report state behind the same interfaces, with a database-level append-only guard on audit rows
 - local verification, packaged build smoke test, static preview smoke test and an active GitHub Actions workflow (`.github/workflows/ci.yml`)
+- contract-context and finance-context handlers: the approved definition set and the contract digital twin copied without change; invoices read through the finance port with dispute and contradiction flags and no financial action
+- PM compliance KPI (`pm_compliance`, demo threshold) through the readiness gate, the engine, the Control Tower and the generated pack
+- production adapters for the contract repository (JSON export, approved sets and twins only) and condition monitoring (read-only REST); production names every missing input and refuses to start
+- persisted governed run records (`railmind_runs`, immutable by trigger), bounded retries for transient source errors (audited), a guarded model gateway with deterministic fallback when the endpoint fails, and caller-declared run sequences linked in the ledger
+- multi-report and multi-contract scoping through a report registry: every package is addressed by id and scope-checked against its own contract; the demo serves a monthly and a quarterly package and a second synthetic contract
+- GIS as a bounded domain (Phase 11): a synthetic schematic behind a read port, joined with Control Tower facts by fixed status rules; positions are canvas percentages, never coordinates; the preview renders every marker from the generated pack or the API
+- contract digital twin (Phase 12): obligations with clause references, bound KPIs, reporting duties with due rules, evidence rules and consequences, read from the repository and evaluated on decision-grade facts only; demo twin is `demo_only`
+- review comment sheet and owner/contractor disagreement layer (Phases 13 and 14): both positions with evidence, a named resolution or escalation, audited transitions, ledger lineage, and approval held while a disagreement is open
+- private knowledge runtime (Phase 15): classification-gated deterministic retrieval of reference passages, cited by the reporting and contract-context agents for wording only, in memory or PostgreSQL
+- report selector in the preview: KPIs, exceptions, assets, timeline, GIS, twin and review sheet follow the selected package from the live API when signed in
 
 > **Important:** KPI formulas and thresholds included in the demo are synthetic examples only. They are not RTA contractual definitions and must be replaced by formally approved rules before production. The portfolio is a seeded synthetic dataset and its forecast is exploratory decision support, not a committed budget, cash forecast or contractual entitlement. GIS and Portfolio Intelligence are bounded optional modules, not a mandate for RailMind to become an uncontrolled super-app.
 
@@ -90,7 +100,8 @@ The browser layer owns bilingual labels and layout only. If a number on screen i
 | Method | Route | Purpose |
 |---|---|---|
 | GET | `/api/health` | service status and active persistence mode |
-| GET | `/api/report` | current report package, readiness (next transitions, blockers, approval validity), evidence version, audit trail and ledger entries; supersedes a stale approval automatically |
+| GET | `/api/reports` | registered packages within the principal's scope, with status and readiness |
+| GET | `/api/report` | a report package (`?reportId=`, default package when omitted), readiness (next transitions, blockers including open disagreements, approval validity), evidence version, audit trail and ledger entries; supersedes a stale approval automatically |
 | GET | `/api/control-tower` | Control Tower DTO (KPIs with readiness, exceptions, assets, evidence, freshness, report status, replay timeline); `?asOf=` replays period-to-date through the pipeline |
 | POST | `/api/report/transition` | `{ type, note?, at? }` with `type` one of `submit_for_review`, `approve`, `reject`, `lock`, `supersede`, `revise`; actor comes from the token; refused transitions return 409 with blockers and are audited |
 | GET | `/api/portfolio` | synthetic portfolio DTO: cells, forecast metadata with confidence, totals, funding-gap exceptions (`?asOf=&horizon=`) |
@@ -102,6 +113,13 @@ The browser layer owns bilingual labels and layout only. If a number on screen i
 | GET | `/api/runs` | run records of this process |
 | GET | `/api/audit` | all audit events with hash-chain verification |
 | GET | `/api/agents` | the registered agent catalog |
+| POST | `/api/agent/sequence` | `{ tasks: [...] }` (1 to 8) executes a caller-declared chain of governed runs; every task is permission-checked first; runs are linked in the ledger; stops at the first run that does not complete |
+| GET | `/api/gis` | GIS view for a package (`?reportId=&lineId=`): schematic nodes with a status and evidence joined from Control Tower facts; 503 without a schematic adapter |
+| GET | `/api/contract-twin` | the contract digital twin evaluated against the package (`?reportId=`); 404 when the repository publishes none |
+| GET | `/api/review` | comment sheet, disagreements and the approval blockers they raise (`?reportId=`) |
+| POST | `/api/review/comment`, `/api/review/comment/transition` | add a comment as the principal's party; respond or close |
+| POST | `/api/review/disagreement`, `/api/review/disagreement/transition` | raise a disagreement with position and evidence; record the other position; resolve with a named outcome or escalate (`review.resolve`) |
+| GET | `/api/knowledge` | documents (no query) or deterministic passage retrieval (`?query=&contractId=&limit=`) within the deployment classification |
 
 ### Authentication and roles
 
@@ -109,13 +127,15 @@ Every route except `/api/health` and `/api/auth/demo-identities` requires `Autho
 
 | Role | Permissions |
 |---|---|
-| viewer | read report, control tower, audit, ledger, runs, agents |
-| maintenance_engineer | read, plan, run maintenance and asset capabilities, submit and revise a report |
-| reliability_engineer | read, plan, run asset and maintenance capabilities |
-| contract_manager | read, plan, run contract and maintenance capabilities, submit and revise a report |
-| finance_reviewer | read, plan, run finance capabilities |
-| approver | read, approve, reject, supersede and lock a report |
-| administrator | everything, plus reset of the demo package |
+| viewer | read report, control tower, audit, ledger, runs, agents, GIS, twin, review sheet, knowledge |
+| maintenance_engineer | read, plan, run maintenance and asset capabilities, submit and revise a report, comment and record positions |
+| reliability_engineer | read, plan, run asset and maintenance capabilities, comment and record positions |
+| contract_manager | read, plan, run contract and maintenance capabilities, submit and revise a report, comment and record positions |
+| finance_reviewer | read, plan, run finance capabilities, comment and record positions |
+| approver | read, approve, reject, supersede and lock a report, comment, resolve and escalate disagreements |
+| administrator | everything, plus reset of a package |
+
+Principals may carry a `party` (`owner` or `contractor`) that names the side they speak for on the review sheet; a principal without one (administrators) declares it per action. Demo identities: the maintenance engineers are contractor-side; reliability, contract, finance and approver identities are owner-side.
 
 Every principal carries scopes (`system`, `line`, `asset_group`, `contract`, `portfolio`, `business_area`). Report, control tower, transition, plan and run routes check both the permission and the scope of the target contract; denials are audited.
 
@@ -123,7 +143,7 @@ Without `RAILMIND_USERS` the server runs in **demo mode** with public demo token
 
 ### Data modes and readiness
 
-`RAILMIND_MODE=demo` (default) serves synthetic records with provenance through the same pipeline production will use. `RAILMIND_MODE=production` requires live adapters for Maximo, the contract repository and condition monitoring and refuses to start otherwise; there is no fallback to synthetic data. Every KPI carries a readiness state from the deterministic gate: READY, PROVISIONAL (usable with visible caveats) or BLOCKED (never decision-grade, excluded from contractual exceptions and narrative facts). Demo KPI definitions are `demo_only` and can never be admitted in production.
+`RAILMIND_MODE=demo` (default) serves synthetic records with provenance through the same pipeline production will use, for two synthetic contracts and two report cadences. `RAILMIND_MODE=production` requires live adapters for Maximo, the contract repository (JSON export with approved definition sets and, optionally, approved twins) and condition monitoring, plus the reporting scope, and refuses to start otherwise; there is no fallback to synthetic data. Production has no GIS schematic adapter yet, so `/api/gis` answers 503, and its knowledge corpus is whatever has been loaded into `railmind_knowledge_documents`. Every KPI carries a readiness state from the deterministic gate: READY, PROVISIONAL (usable with visible caveats) or BLOCKED (never decision-grade, excluded from contractual exceptions and narrative facts). Demo KPI definitions are `demo_only` and can never be admitted in production.
 
 ### Configuration
 
@@ -139,7 +159,7 @@ docker compose -f infra/docker-compose.yml up --build
 
 ### Persistence
 
-Without `DATABASE_URL` all state is in memory and resets on restart. With `DATABASE_URL` set, the server uses the PostgreSQL adapters in `src/persistence/postgres.ts` through the optional `pg` driver and creates the schema from `infra/sql/001_railmind_core.sql` on start. Audit and ledger rows are protected by database triggers that reject `UPDATE` and `DELETE`; report state, memory, approvals and ledger entries survive restarts.
+Without `DATABASE_URL` all state is in memory and resets on restart. With `DATABASE_URL` set, the server uses the PostgreSQL adapters in `src/persistence/postgres.ts` (audit log, memory, report state, decision ledger, run records, review comments and disagreements, knowledge documents) through the optional `pg` driver and creates the schema from `infra/sql/001_railmind_core.sql` on start. Audit and ledger rows are protected by database triggers that reject `UPDATE` and `DELETE`; report state, memory, approvals and ledger entries survive restarts.
 
 ```bash
 docker compose -f infra/docker-compose.yml up -d
