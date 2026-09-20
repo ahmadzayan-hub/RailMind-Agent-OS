@@ -95,3 +95,23 @@ DROP TRIGGER IF EXISTS railmind_runs_no_update ON railmind_runs;
 CREATE TRIGGER railmind_runs_no_update
   BEFORE UPDATE OR DELETE ON railmind_runs
   FOR EACH ROW EXECUTE FUNCTION railmind_audit_immutable();
+
+-- Review comment sheet and disagreements: mutable projections; transitions are audited and ledgered.
+CREATE TABLE IF NOT EXISTS railmind_review_comments (
+  comment_id  TEXT PRIMARY KEY,
+  report_id   TEXT NOT NULL,
+  contract_id TEXT NOT NULL,
+  status      TEXT NOT NULL,
+  record      JSONB NOT NULL,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS railmind_review_comments_report_idx ON railmind_review_comments (report_id);
+CREATE TABLE IF NOT EXISTS railmind_disagreements (
+  disagreement_id TEXT PRIMARY KEY,
+  report_id       TEXT NOT NULL,
+  contract_id     TEXT NOT NULL,
+  status          TEXT NOT NULL,
+  record          JSONB NOT NULL,
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS railmind_disagreements_report_idx ON railmind_disagreements (report_id);

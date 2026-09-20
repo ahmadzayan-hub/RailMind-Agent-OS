@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 
 import { GENESIS_HASH } from '../src/audit/log.ts';
 import { DEMO_REPORT } from '../src/demo.ts';
-import { PgAuditLog, PgMemoryStore, PgReportStore, PgRunStore, RAILMIND_SCHEMA_SQL, ensureSchema } from '../src/persistence/postgres.ts';
+import { PgAuditLog, PgMemoryStore, PgReportStore, PgReviewStore, PgRunStore, RAILMIND_SCHEMA_SQL, ensureSchema } from '../src/persistence/postgres.ts';
+import { createComment, raiseDisagreement, recordPosition } from '../src/review/contracts.ts';
 import type { SqlClient, SqlDatabase, SqlRow } from '../src/persistence/sql.ts';
 
 /**
@@ -17,6 +18,8 @@ class FakeDatabase implements SqlDatabase {
   readonly memory: SqlRow[] = [];
   readonly reports = new Map<string, SqlRow>();
   readonly runs = new Map<string, SqlRow>();
+  readonly comments = new Map<string, SqlRow>();
+  readonly disagreements = new Map<string, SqlRow>();
   readonly statements: string[] = [];
   transactions = 0;
   locks = 0;
@@ -49,6 +52,14 @@ class FakeDatabase implements SqlDatabase {
     if (text.includes('INSERT INTO railmind_runs')) { if (this.runs.has(String(p[0]))) throw new Error('duplicate key value violates unique constraint'); this.runs.set(String(p[0]), { record: JSON.parse(String(p[10])) }); return { rows: [] }; }
     if (text.includes('SELECT record FROM railmind_runs WHERE')) { const row = this.runs.get(String(p[0])); return { rows: row ? [row] : [] }; }
     if (text.includes('SELECT record FROM railmind_runs ORDER')) return { rows: [...this.runs.values()] };
+    if (text.includes('INSERT INTO railmind_review_comments')) { this.comments.set(String(p[0]), { report_id: p[1], status: p[3], record: JSON.parse(String(p[4])) }); return { rows: [] }; }
+    if (text.includes('FROM railmind_review_comments WHERE comment_id')) { const row = this.comments.get(String(p[0])); return { rows: row ? [row] : [] }; }
+    if (text.includes('FROM railmind_review_comments WHERE report_id')) return { rows: [...this.comments.values()].filter((row) => row.report_id === p[0]) };
+    if (text.includes('count(*)::int AS n FROM railmind_review_comments')) return { rows: [{ n: this.comments.size }] };
+    if (text.includes('INSERT INTO railmind_disagreements')) { this.disagreements.set(String(p[0]), { report_id: p[1], status: p[3], record: JSON.parse(String(p[4])) }); return { rows: [] }; }
+    if (text.includes('FROM railmind_disagreements WHERE disagreement_id')) { const row = this.disagreements.get(String(p[0])); return { rows: row ? [row] : [] }; }
+    if (text.includes('FROM railmind_disagreements WHERE report_id')) return { rows: [...this.disagreements.values()].filter((row) => row.report_id === p[0]) };
+    if (text.includes('count(*)::int AS n FROM railmind_disagreements')) return { rows: [{ n: this.disagreements.size }] };
     if (text.includes('CREATE TABLE IF NOT EXISTS railmind_audit_events')) return { rows: [] };
     throw new Error(`Unexpected SQL: ${text}`);
   }
@@ -140,4 +151,26 @@ test('PgRunStore writes each governed run once and reads it back intact', async 
   assert.equal((await store.all()).length, 1);
   await assert.rejects(() => store.append(record), /duplicate key/);
   assert.match(RAILMIND_SCHEMA_SQL, /BEFORE UPDATE OR DELETE ON railmind_runs/);
+});
+
+test('PgReviewStore upserts comments and disagreements as projections and counts them for id minting', async () => {
+  const db = new FakeDatabase();
+  const store = new PgReviewStore(db);
+  const owner = { principalId: 'rmd.reviewer', role: 'contract_manager', party: 'owner' as const };
+  const contractor = { principalId: 'ctr.engineer', role: 'maintenance_engineer', party: 'contractor' as const };
+  const comment = createComment({ commentId: 'CMT-1', reportId: 'R-1', contractId: 'C-1', subject: { type: 'kpi', id: 'mttr' }, actor: owner, text: 'Confirm the clock start.', at: '2026-09-02T08:00:00Z' }).record;
+  await store.saveComment(comment);
+  assert.equal((await store.getComment('CMT-1'))?.status, 'open');
+  const raised = raiseDisagreement({ disagreementId: 'DSG-1', reportId: 'R-1', contractId: 'C-1', subject: { type: 'kpi', id: 'mttr' }, summary: 'Access delay.', raisedBy: contractor, position: { text: 'Waited for access.', evidence: [] }, at: '2026-09-02T09:00:00Z' }).record;
+  await store.saveDisagreement(raised);
+  const both = recordPosition(raised, owner, 'Access was on time.', [], '2026-09-02T10:00:00Z').record;
+  await store.saveDisagreement(both);
+  const stored = await store.getDisagreement('DSG-1');
+  assert.equal(stored?.status, 'positions_recorded');
+  assert.equal(stored?.history.length, 2);
+  assert.equal(db.disagreements.get('DSG-1')?.status, 'positions_recorded', 'the status column follows the record');
+  assert.equal((await store.listDisagreements('R-1')).length, 1);
+  assert.equal((await store.listComments('R-2')).length, 0);
+  assert.deepEqual(await store.count(), { comments: 1, disagreements: 1 });
+  assert.ok(db.statements.some((s) => s.startsWith('INSERT INTO railmind_review_comments')));
 });

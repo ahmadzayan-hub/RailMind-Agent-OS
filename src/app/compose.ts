@@ -21,6 +21,7 @@ import { OpenAiCompatibleGateway } from '../llm/openai-compatible.ts';
 import type { SqlDatabase } from '../persistence/sql.ts';
 import { InMemoryReportStore, type ReportStore } from '../reporting/store.ts';
 import { createReportRegistry } from '../reporting/registry.ts';
+import { InMemoryReviewStore, type ReviewStore } from '../review/store.ts';
 import { InMemoryGisReadPort, type GisReadPort } from '../gis/contracts.ts';
 import { DEMO_SCHEMATIC } from '../gis/demo-schematic.ts';
 import type { ApiDependencies } from '../api/router.ts';
@@ -76,17 +77,19 @@ export async function composeApplication(config: AppConfig, overrides: ComposeOv
   let reportStore: ReportStore;
   let ledger: DecisionLedger;
   let runStore: RunStore;
+  let reviewStore: ReviewStore;
   let persistence: ApiDependencies['persistence'] = 'in-memory';
   let close: () => Promise<void> = async () => {};
 
   if (overrides.database) {
-    const { PgAuditLog, PgDecisionLedger, PgMemoryStore, PgReportStore, PgRunStore, ensureSchema } = await import('../persistence/postgres.ts');
+    const { PgAuditLog, PgDecisionLedger, PgMemoryStore, PgReportStore, PgReviewStore, PgRunStore, ensureSchema } = await import('../persistence/postgres.ts');
     await ensureSchema(overrides.database);
     auditLog = new PgAuditLog(overrides.database);
     memoryStore = new PgMemoryStore(overrides.database);
     reportStore = new PgReportStore(overrides.database);
     ledger = new PgDecisionLedger(overrides.database);
     runStore = new PgRunStore(overrides.database);
+    reviewStore = new PgReviewStore(overrides.database);
     persistence = 'postgres';
     const db = overrides.database;
     close = () => db.close();
@@ -96,6 +99,7 @@ export async function composeApplication(config: AppConfig, overrides: ComposeOv
     reportStore = new InMemoryReportStore();
     ledger = new InMemoryDecisionLedger();
     runStore = new InMemoryRunStore();
+    reviewStore = new InMemoryReviewStore();
   }
 
   /*
@@ -166,7 +170,7 @@ export async function composeApplication(config: AppConfig, overrides: ComposeOv
   const portfolio = new PortfolioService(createSyntheticPortfolioProvider(), { now: overrides.now, publicBuild: config.mode === 'demo' });
 
   return {
-    api: { reportStore, auditLog, memoryStore, seedReport, persistence, runtime, classification: config.classification, now: overrides.now, tokenDirectory: createTokenDirectory(config.usersJson), healthCheck: overrides.database ? async () => { await overrides.database?.query('SELECT 1'); } : undefined, controlTower, scope, mode: providers.mode, ledger, portfolio, reports, gis, contract },
+    api: { reportStore, auditLog, memoryStore, seedReport, persistence, runtime, classification: config.classification, now: overrides.now, tokenDirectory: createTokenDirectory(config.usersJson), healthCheck: overrides.database ? async () => { await overrides.database?.query('SELECT 1'); } : undefined, controlTower, scope, mode: providers.mode, ledger, portfolio, reports, gis, contract, reviewStore },
     runtime,
     providers,
     controlTower,

@@ -1,5 +1,7 @@
 import type { AgentRunRecord, EvidenceRef } from '../agent-os/contracts.ts';
 import type { RunStore } from '../agent-os/run-store.ts';
+import type { ReviewStore } from '../review/store.ts';
+import type { Disagreement, ReviewComment } from '../review/contracts.ts';
 import type { MemoryKind, MemoryRecord, MemoryStore } from '../agent-os/memory.ts';
 import {
   GENESIS_HASH,
@@ -106,6 +108,25 @@ DROP TRIGGER IF EXISTS railmind_runs_no_update ON railmind_runs;
 CREATE TRIGGER railmind_runs_no_update
   BEFORE UPDATE OR DELETE ON railmind_runs
   FOR EACH ROW EXECUTE FUNCTION railmind_audit_immutable();
+
+CREATE TABLE IF NOT EXISTS railmind_review_comments (
+  comment_id  TEXT PRIMARY KEY,
+  report_id   TEXT NOT NULL,
+  contract_id TEXT NOT NULL,
+  status      TEXT NOT NULL,
+  record      JSONB NOT NULL,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS railmind_review_comments_report_idx ON railmind_review_comments (report_id);
+CREATE TABLE IF NOT EXISTS railmind_disagreements (
+  disagreement_id TEXT PRIMARY KEY,
+  report_id       TEXT NOT NULL,
+  contract_id     TEXT NOT NULL,
+  status          TEXT NOT NULL,
+  record          JSONB NOT NULL,
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS railmind_disagreements_report_idx ON railmind_disagreements (report_id);
 `;
 
 /** Advisory lock key that serialises audit appends across connections. */
@@ -394,5 +415,63 @@ export class PgRunStore implements RunStore {
   async all(): Promise<readonly AgentRunRecord[]> {
     const result = await this.#db.query('SELECT record FROM railmind_runs ORDER BY started_at ASC, run_id ASC');
     return result.rows.map(toRunRecord);
+  }
+}
+
+function jsonColumn<T>(row: SqlRow): T {
+  const raw = row.record;
+  return (typeof raw === 'string' ? JSON.parse(raw) : raw) as T;
+}
+
+/** Review comments and disagreements as mutable projections; every transition is also audited and, for disagreements, ledgered. */
+export class PgReviewStore implements ReviewStore {
+  readonly #db: SqlClient;
+
+  constructor(db: SqlClient) {
+    this.#db = db;
+  }
+
+  async saveComment(comment: ReviewComment): Promise<void> {
+    await this.#db.query(
+      `INSERT INTO railmind_review_comments (comment_id, report_id, contract_id, status, record, updated_at)
+       VALUES ($1, $2, $3, $4, $5::jsonb, now())
+       ON CONFLICT (comment_id) DO UPDATE SET status = EXCLUDED.status, record = EXCLUDED.record, updated_at = now()`,
+      [comment.commentId, comment.reportId, comment.contractId, comment.status, JSON.stringify(comment)],
+    );
+  }
+
+  async getComment(commentId: string): Promise<ReviewComment | null> {
+    const result = await this.#db.query('SELECT record FROM railmind_review_comments WHERE comment_id = $1', [commentId]);
+    return result.rows[0] ? jsonColumn<ReviewComment>(result.rows[0]) : null;
+  }
+
+  async listComments(reportId: string): Promise<readonly ReviewComment[]> {
+    const result = await this.#db.query('SELECT record FROM railmind_review_comments WHERE report_id = $1 ORDER BY comment_id ASC', [reportId]);
+    return result.rows.map((row) => jsonColumn<ReviewComment>(row));
+  }
+
+  async saveDisagreement(disagreement: Disagreement): Promise<void> {
+    await this.#db.query(
+      `INSERT INTO railmind_disagreements (disagreement_id, report_id, contract_id, status, record, updated_at)
+       VALUES ($1, $2, $3, $4, $5::jsonb, now())
+       ON CONFLICT (disagreement_id) DO UPDATE SET status = EXCLUDED.status, record = EXCLUDED.record, updated_at = now()`,
+      [disagreement.disagreementId, disagreement.reportId, disagreement.contractId, disagreement.status, JSON.stringify(disagreement)],
+    );
+  }
+
+  async getDisagreement(disagreementId: string): Promise<Disagreement | null> {
+    const result = await this.#db.query('SELECT record FROM railmind_disagreements WHERE disagreement_id = $1', [disagreementId]);
+    return result.rows[0] ? jsonColumn<Disagreement>(result.rows[0]) : null;
+  }
+
+  async listDisagreements(reportId: string): Promise<readonly Disagreement[]> {
+    const result = await this.#db.query('SELECT record FROM railmind_disagreements WHERE report_id = $1 ORDER BY disagreement_id ASC', [reportId]);
+    return result.rows.map((row) => jsonColumn<Disagreement>(row));
+  }
+
+  async count(): Promise<{ comments: number; disagreements: number }> {
+    const comments = await this.#db.query('SELECT count(*)::int AS n FROM railmind_review_comments');
+    const disagreements = await this.#db.query('SELECT count(*)::int AS n FROM railmind_disagreements');
+    return { comments: Number(comments.rows[0]?.n ?? 0), disagreements: Number(disagreements.rows[0]?.n ?? 0) };
   }
 }

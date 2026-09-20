@@ -58,5 +58,8 @@ export * from './gis/demo-schematic.ts';
 export * from './gis/service.ts';
 export * from './web/gis-pack.ts';
 export * from './contract-twin/contracts.ts';
+export { createComment, respondToComment, closeComment, raiseDisagreement, recordPosition, resolveDisagreement, escalateDisagreement, reviewBlockers, isOpenDisagreement, SUBJECT_TYPES, RESOLUTION_OUTCOMES, OPEN_DISAGREEMENT_STATUSES } from './review/contracts.ts';
+export type { ReviewSubjectType, ReviewSubject, ReviewActor, CommentResponse, CommentStatus, ReviewComment, Position, DisagreementStatus, ResolutionOutcome, DisagreementResolution, DisagreementHistoryEntry, Disagreement, ReviewTransitionResult, NewComment, NewDisagreement } from './review/contracts.ts';
+export * from './review/store.ts';
 export * from './contract-twin/service.ts';
 export * from './web/contract-twin-pack.ts';
