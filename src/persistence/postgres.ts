@@ -1,4 +1,5 @@
-import type { EvidenceRef } from '../agent-os/contracts.ts';
+import type { AgentRunRecord, EvidenceRef } from '../agent-os/contracts.ts';
+import type { RunStore } from '../agent-os/run-store.ts';
 import type { MemoryKind, MemoryRecord, MemoryStore } from '../agent-os/memory.ts';
 import {
   GENESIS_HASH,
@@ -86,6 +87,25 @@ CREATE TABLE IF NOT EXISTS railmind_reports (
   package    JSONB NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS railmind_runs (
+  run_id        TEXT PRIMARY KEY,
+  task_id       TEXT NOT NULL,
+  actor_id      TEXT NOT NULL,
+  capability    TEXT NOT NULL,
+  agent_id      TEXT,
+  status        TEXT NOT NULL,
+  classification TEXT NOT NULL,
+  started_at    TIMESTAMPTZ NOT NULL,
+  completed_at  TIMESTAMPTZ NOT NULL,
+  release_ready BOOLEAN NOT NULL,
+  record        JSONB NOT NULL,
+  recorded_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS railmind_runs_task_idx ON railmind_runs (task_id, started_at);
+DROP TRIGGER IF EXISTS railmind_runs_no_update ON railmind_runs;
+CREATE TRIGGER railmind_runs_no_update
+  BEFORE UPDATE OR DELETE ON railmind_runs
+  FOR EACH ROW EXECUTE FUNCTION railmind_audit_immutable();
 `;
 
 /** Advisory lock key that serialises audit appends across connections. */
@@ -342,5 +362,37 @@ export class PgDecisionLedger implements DecisionLedger {
   async trace(ledgerId: string): Promise<LedgerTrace | null> {
     const record = await this.get(ledgerId);
     return record ? buildTrace(record, await this.all()) : null;
+  }
+}
+
+function toRunRecord(row: SqlRow): AgentRunRecord {
+  const value = row.record;
+  return (typeof value === 'string' ? JSON.parse(value) : value) as AgentRunRecord;
+}
+
+/** Immutable run records in PostgreSQL; rows are protected by the same append-only trigger as the audit log. */
+export class PgRunStore implements RunStore {
+  readonly #db: SqlClient;
+
+  constructor(db: SqlClient) {
+    this.#db = db;
+  }
+
+  async append(record: AgentRunRecord): Promise<void> {
+    await this.#db.query(
+      `INSERT INTO railmind_runs (run_id, task_id, actor_id, capability, agent_id, status, classification, started_at, completed_at, release_ready, record)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)`,
+      [record.runId, record.task.taskId, record.task.actorId, record.task.capability, record.agentId, record.status, record.classification, record.startedAt, record.completedAt, record.releaseReady, JSON.stringify(record)],
+    );
+  }
+
+  async get(runId: string): Promise<AgentRunRecord | null> {
+    const result = await this.#db.query('SELECT record FROM railmind_runs WHERE run_id = $1', [runId]);
+    return result.rows[0] ? toRunRecord(result.rows[0]) : null;
+  }
+
+  async all(): Promise<readonly AgentRunRecord[]> {
+    const result = await this.#db.query('SELECT record FROM railmind_runs ORDER BY started_at ASC, run_id ASC');
+    return result.rows.map(toRunRecord);
   }
 }

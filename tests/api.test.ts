@@ -223,8 +223,10 @@ test('API executes a governed agent run through the composition root and audits 
     assert.equal(reliabilityRunsReport.status, 403, 'reliability engineer cannot draft contractual reports');
     const blocked = await fetch(`${base}/api/agent/run`, { method: 'POST', headers: auth, body: JSON.stringify({ capability: 'asset-health', goal: 'x', riskClass: 'operational', actionMode: 'control' }) });
     assert.equal(blocked.status, 403);
-    const runs = await (await fetch(`${base}/api/runs`, { headers: auth })).json() as { runs: unknown[] };
+    const runs = await (await fetch(`${base}/api/runs`, { headers: auth })).json() as { runs: { runId: string }[]; persistence: string };
     assert.equal(runs.runs.length, 2);
+    assert.equal(runs.persistence, 'in-memory');
+    assert.equal((await app.runtime.record(runs.runs[0]!.runId))?.runId, runs.runs[0]!.runId);
     const audit = await (await fetch(`${base}/api/audit`, { headers: auth })).json() as { chain: { valid: boolean } };
     assert.equal(audit.chain.valid, true);
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await app.close(); }

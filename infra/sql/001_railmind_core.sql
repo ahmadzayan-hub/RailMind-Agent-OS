@@ -74,3 +74,24 @@ CREATE TABLE IF NOT EXISTS railmind_reports (
   package    JSONB NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Governed agent run records: immutable by trigger.
+CREATE TABLE IF NOT EXISTS railmind_runs (
+  run_id        TEXT PRIMARY KEY,
+  task_id       TEXT NOT NULL,
+  actor_id      TEXT NOT NULL,
+  capability    TEXT NOT NULL,
+  agent_id      TEXT,
+  status        TEXT NOT NULL,
+  classification TEXT NOT NULL,
+  started_at    TIMESTAMPTZ NOT NULL,
+  completed_at  TIMESTAMPTZ NOT NULL,
+  release_ready BOOLEAN NOT NULL,
+  record        JSONB NOT NULL,
+  recorded_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS railmind_runs_task_idx ON railmind_runs (task_id, started_at);
+DROP TRIGGER IF EXISTS railmind_runs_no_update ON railmind_runs;
+CREATE TRIGGER railmind_runs_no_update
+  BEFORE UPDATE OR DELETE ON railmind_runs
+  FOR EACH ROW EXECUTE FUNCTION railmind_audit_immutable();

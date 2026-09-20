@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { GENESIS_HASH } from '../src/audit/log.ts';
 import { DEMO_REPORT } from '../src/demo.ts';
-import { PgAuditLog, PgMemoryStore, PgReportStore, RAILMIND_SCHEMA_SQL, ensureSchema } from '../src/persistence/postgres.ts';
+import { PgAuditLog, PgMemoryStore, PgReportStore, PgRunStore, RAILMIND_SCHEMA_SQL, ensureSchema } from '../src/persistence/postgres.ts';
 import type { SqlClient, SqlDatabase, SqlRow } from '../src/persistence/sql.ts';
 
 /**
@@ -16,6 +16,7 @@ class FakeDatabase implements SqlDatabase {
   readonly audit: SqlRow[] = [];
   readonly memory: SqlRow[] = [];
   readonly reports = new Map<string, SqlRow>();
+  readonly runs = new Map<string, SqlRow>();
   readonly statements: string[] = [];
   transactions = 0;
   locks = 0;
@@ -45,6 +46,9 @@ class FakeDatabase implements SqlDatabase {
     if (text.includes('INSERT INTO railmind_reports')) { this.reports.set(String(p[0]), { package: JSON.parse(String(p[2])) }); return { rows: [] }; }
     if (text.includes('SELECT package FROM railmind_reports WHERE')) { const row = this.reports.get(String(p[0])); return { rows: row ? [row] : [] }; }
     if (text.includes('SELECT package FROM railmind_reports ORDER')) return { rows: [...this.reports.values()] };
+    if (text.includes('INSERT INTO railmind_runs')) { if (this.runs.has(String(p[0]))) throw new Error('duplicate key value violates unique constraint'); this.runs.set(String(p[0]), { record: JSON.parse(String(p[10])) }); return { rows: [] }; }
+    if (text.includes('SELECT record FROM railmind_runs WHERE')) { const row = this.runs.get(String(p[0])); return { rows: row ? [row] : [] }; }
+    if (text.includes('SELECT record FROM railmind_runs ORDER')) return { rows: [...this.runs.values()] };
     if (text.includes('CREATE TABLE IF NOT EXISTS railmind_audit_events')) return { rows: [] };
     throw new Error(`Unexpected SQL: ${text}`);
   }
@@ -125,4 +129,15 @@ test('PgReportStore upserts and reads back the full package', async () => {
   assert.equal(stored?.status, 'under_review');
   assert.equal(stored?.kpis.length, 6);
   assert.equal((await store.list()).length, 1);
+});
+
+test('PgRunStore writes each governed run once and reads it back intact', async () => {
+  const db = new FakeDatabase();
+  const store = new PgRunStore(db);
+  const record = { runId: 'RUN-1', task: { taskId: 'T-1', actorId: 'engineer-1', goal: 'g', capability: 'maintenance-kpi', riskClass: 'operational' as const, actionMode: 'analyse' as const, requestedAt: '2026-09-01T08:00:00Z' }, agentId: 'maintenance-kpi', status: 'completed' as const, classification: 'synthetic' as const, startedAt: '2026-09-01T08:00:00Z', completedAt: '2026-09-01T08:00:01Z', toolCalls: [], modelUsed: false, output: null, approvalRequired: false, releaseReady: true, reason: 'ok', auditSequences: [1, 2] };
+  await store.append(record);
+  assert.deepEqual(await store.get('RUN-1'), record);
+  assert.equal((await store.all()).length, 1);
+  await assert.rejects(() => store.append(record), /duplicate key/);
+  assert.match(RAILMIND_SCHEMA_SQL, /BEFORE UPDATE OR DELETE ON railmind_runs/);
 });
