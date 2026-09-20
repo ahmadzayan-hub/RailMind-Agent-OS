@@ -14,7 +14,7 @@ import { InMemoryAuditLog } from '../src/audit/log.ts';
 import { InMemoryConditionReadPort } from '../src/connectors/condition/port.ts';
 import { InMemoryContractReadPort } from '../src/connectors/contract/port.ts';
 import { MockMaximoReadPort } from '../src/connectors/maximo/mock.ts';
-import { DEMO_ASSETS, DEMO_CONDITION_PROFILES, DEMO_CONTRACT_KPI_SET, DEMO_PM_RECORDS, DEMO_SCOPE, DEMO_WORK_ORDERS } from '../src/demo.ts';
+import { DEMO_ASSETS, DEMO_CONDITION_PROFILES, DEMO_CONTRACT_KPI_SET, DEMO_INVOICES, DEMO_PM_RECORDS, DEMO_SCOPE, DEMO_WORK_ORDERS } from '../src/demo.ts';
 
 function task(overrides: Partial<AgentTask> = {}): AgentTask {
   return { taskId: 'T-1', actorId: 'engineer-1', goal: 'demo', capability: 'maintenance-kpi', riskClass: 'operational', actionMode: 'analyse', requestedAt: '2026-09-09T10:00:00Z', ...overrides };
@@ -23,7 +23,7 @@ function task(overrides: Partial<AgentTask> = {}): AgentTask {
 function runtime(options: { handlers?: readonly CapabilityHandler[]; model?: ModelGateway | null; baseUrl?: string | null; tools?: ToolRegistry } = {}) {
   const auditLog = new InMemoryAuditLog();
   const memoryStore = new InMemoryMemoryStore();
-  const tools = options.tools ?? buildStandardTools({ maximo: new MockMaximoReadPort({ assets: DEMO_ASSETS, workOrders: DEMO_WORK_ORDERS, preventiveMaintenance: DEMO_PM_RECORDS }), contract: new InMemoryContractReadPort([DEMO_CONTRACT_KPI_SET]), condition: new InMemoryConditionReadPort(DEMO_CONDITION_PROFILES), memory: memoryStore });
+  const tools = options.tools ?? buildStandardTools({ maximo: new MockMaximoReadPort({ assets: DEMO_ASSETS, workOrders: DEMO_WORK_ORDERS, preventiveMaintenance: DEMO_PM_RECORDS, invoices: DEMO_INVOICES }), contract: new InMemoryContractReadPort([DEMO_CONTRACT_KPI_SET]), condition: new InMemoryConditionReadPort(DEMO_CONDITION_PROFILES), memory: memoryStore });
   let tick = 0;
   const rt = new AgentRuntime({ catalog: AGENT_CATALOG, tools, handlers: options.handlers ?? createStandardHandlers(DEMO_SCOPE), auditLog, memoryStore, modelGateway: options.model ?? null, modelPolicy: { baseUrl: options.baseUrl ?? null, remoteApprovedForInternal: false, remoteApprovedForConfidential: false }, now: () => new Date(Date.parse('2026-09-09T10:00:00Z') + (tick++) * 1000).toISOString() });
   return { rt, auditLog, memoryStore };
@@ -186,4 +186,59 @@ test('maintenance priority proposals are gated: analyse mode never proposes; pro
   assert.equal(worst?.priority, 1);
   assert.equal(worst?.submittedToMaximo, false);
   assert.equal(reviewed.releaseReady, false, 'a proposal is never release-ready without the runtime approval gate');
+});
+
+test('contract context copies the approved definition set through contract.read only and labels a demo set as non-contractual', async () => {
+  const { rt } = runtime();
+  const record = await rt.run(task({ capability: 'contract-context', riskClass: 'routine', actionMode: 'analyse' }));
+  assert.equal(record.status, 'completed');
+  assert.equal(record.agentId, 'contract-context');
+  assert.equal(record.approvalRequired, true, 'the kernel escalates contract context to contractual, so approval is required');
+  assert.equal(record.releaseReady, false);
+  assert.equal(record.modelUsed, false);
+  assert.deepEqual(record.toolCalls.map((c) => c.toolId), ['contract.read']);
+  const value = record.output?.value as { contractual: boolean; approvalStatus: string; definitions: { id: string; threshold: number | null; clauseRef: string | null; approvalStatus: string }[]; notEffective: string[]; plannedServiceMinutes: number; assetIds: string[] };
+  assert.equal(value.contractual, false);
+  assert.equal(value.approvalStatus, 'demo_only');
+  assert.deepEqual(value.definitions.map((d) => d.id), ['availability', 'failures', 'mtbf', 'mttr', 'backlog']);
+  assert.equal(value.definitions[0]?.threshold, 99.5);
+  assert.match(value.definitions[0]?.clauseRef ?? '', /DEMO-CLAUSE/);
+  assert.deepEqual(value.notEffective, []);
+  assert.equal(value.plannedServiceMinutes, 31 * 24 * 60 - 1 + 1);
+  assert.equal(value.assetIds.length, 3);
+  assert.equal(record.output?.evidence[0]?.sourceSystem, 'contract_repository');
+  assert.ok(record.output?.assumptions.some((a) => /NOT a contractual authority/.test(a)));
+});
+
+test('finance context reads invoices through finance.read only, flags disputes and takes no financial action', async () => {
+  const { rt } = runtime();
+  const record = await rt.run(task({ capability: 'finance-context', riskClass: 'routine', actionMode: 'analyse' }));
+  assert.equal(record.status, 'completed');
+  assert.equal(record.agentId, 'finance-context');
+  assert.equal(record.approvalRequired, true, 'finance context is escalated to financial');
+  assert.equal(record.modelUsed, false);
+  assert.deepEqual(record.toolCalls.map((c) => c.toolId), ['finance.read']);
+  const value = record.output?.value as { invoiceCount: number; byStatus: Record<string, number>; byWorkflowState: Record<string, number>; totals: { gross: number; approved: number; currency: string | null }; flags: unknown[]; provisional: boolean };
+  assert.equal(value.invoiceCount, 3);
+  assert.deepEqual(value.byStatus, { APPR: 1, WAPPR: 1, HOLD: 1 });
+  assert.equal(value.byWorkflowState.DISPUTED, 1);
+  assert.deepEqual(value.totals, { gross: 264000, approved: 125000, currency: 'AED' });
+  assert.equal(value.provisional, false);
+  assert.equal(record.output?.evidence.length, 3);
+  assert.ok(record.output?.evidence.every((e) => e.sourceSystem === 'maximo_finance' && e.entityType === 'invoice'));
+});
+
+test('finance context stays grounded on an empty invoice set and flags contradictory amounts', async () => {
+  const { summariseInvoices } = await import('../src/agents/finance-context.ts');
+  const summary = summariseInvoices([{ invoiceId: 'I-1', status: 'APPR', grossAmount: 10, approvedAmount: 12, currency: 'AED' }, { invoiceId: 'I-2', status: '', currency: 'USD', invoiceDate: '2026-08-01T00:00:00Z' }]);
+  assert.deepEqual([...summary.flags.map((f) => f.code)].sort(), ['approved_exceeds_gross', 'missing_invoice_date', 'mixed_currency', 'unknown_status']);
+  assert.equal(summary.provisional, true);
+  assert.equal(summary.totals.currency, null);
+
+  const tools = buildStandardTools({ maximo: new MockMaximoReadPort({ assets: DEMO_ASSETS, workOrders: DEMO_WORK_ORDERS }), contract: new InMemoryContractReadPort([DEMO_CONTRACT_KPI_SET]), memory: new InMemoryMemoryStore() });
+  const { rt } = runtime({ tools });
+  const record = await rt.run(task({ capability: 'finance-context', riskClass: 'financial' }));
+  assert.equal(record.status, 'completed');
+  assert.equal((record.output?.value as { invoiceCount: number }).invoiceCount, 0);
+  assert.equal(record.output?.evidence[0]?.entityType, 'invoice-query');
 });

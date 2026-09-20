@@ -1,7 +1,7 @@
 import type { EvidenceRef } from './agent-os/contracts.ts';
 import type { AssetConditionProfile } from './connectors/condition/port.ts';
 import type { ContractKpiSet } from './connectors/contract/port.ts';
-import type { MaximoAssetRecord, MaximoPmRecord, MaximoWorkOrderRecord } from './connectors/maximo/port.ts';
+import type { MaximoAssetRecord, MaximoInvoiceRecord, MaximoPmRecord, MaximoWorkOrderRecord } from './connectors/maximo/port.ts';
 import { DEMO_KPI_DEFINITIONS } from './kpi/demo-definitions.ts';
 import { computeKpiObservation } from './kpi/engine.ts';
 import { buildReportPackage, deterministicExecutiveSummary } from './reporting/generator.ts';
@@ -57,6 +57,13 @@ export const DEMO_PM_RECORDS: readonly MaximoPmRecord[] = [
   { pmId: 'PM-ATC-01', assetId: 'ATC-ZC-01', frequency: 90, frequencyUnit: 'DAYS', lastCompletedAt: '2026-05-20T00:00:00Z', nextDueAt: '2026-08-18T00:00:00Z', status: 'ACTIVE' },
   { pmId: 'PM-ATC-02', assetId: 'ATC-ZC-02', frequency: 90, frequencyUnit: 'DAYS', lastCompletedAt: '2026-03-01T00:00:00Z', nextDueAt: '2026-05-30T00:00:00Z', status: 'ACTIVE' },
   { pmId: 'PM-APS-03', assetId: 'TRAM-APS-03', frequency: 4, frequencyUnit: 'MONTHS', lastCompletedAt: '2026-07-15T00:00:00Z', nextDueAt: '2026-11-15T00:00:00Z', status: 'ACTIVE' },
+];
+
+/** DEMO ONLY invoices served through the finance port. Amounts are synthetic and carry no currency semantics. */
+export const DEMO_INVOICES: readonly MaximoInvoiceRecord[] = [
+  { invoiceId: 'INV-2026-08-01', contractId: 'DEMO-CONTRACT', vendorId: 'VENDOR-DEMO', status: 'APPR', invoiceDate: '2026-08-05T00:00:00Z', grossAmount: 125000, approvedAmount: 125000, currency: 'AED', workflowState: 'PAID' },
+  { invoiceId: 'INV-2026-08-02', contractId: 'DEMO-CONTRACT', vendorId: 'VENDOR-DEMO', status: 'WAPPR', invoiceDate: '2026-08-20T00:00:00Z', grossAmount: 98000, approvedAmount: 0, currency: 'AED', workflowState: 'REVIEW' },
+  { invoiceId: 'INV-2026-08-03', contractId: 'DEMO-CONTRACT', vendorId: 'VENDOR-DEMO', status: 'HOLD', invoiceDate: '2026-08-28T00:00:00Z', grossAmount: 41000, approvedAmount: 0, currency: 'AED', workflowState: 'DISPUTED' },
 ];
 
 /** DEMO ONLY condition profiles (synthetic health indices and signals). */

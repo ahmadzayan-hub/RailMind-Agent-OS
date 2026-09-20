@@ -13,7 +13,7 @@ import { MaximoRestClient } from '../connectors/maximo/client.ts';
 import { MockMaximoReadPort } from '../connectors/maximo/mock.ts';
 import type { MaximoReadPort } from '../connectors/maximo/port.ts';
 import type { AppConfig } from '../config.ts';
-import { DEMO_ASSETS, DEMO_CONDITION_PROFILES, DEMO_CONTRACT_KPI_SET, DEMO_PM_RECORDS, DEMO_REPORT, DEMO_SCOPE, DEMO_WORK_ORDERS } from '../demo.ts';
+import { DEMO_ASSETS, DEMO_CONDITION_PROFILES, DEMO_CONTRACT_KPI_SET, DEMO_INVOICES, DEMO_PM_RECORDS, DEMO_REPORT, DEMO_SCOPE, DEMO_WORK_ORDERS } from '../demo.ts';
 import { OpenAiCompatibleGateway } from '../llm/openai-compatible.ts';
 import type { SqlDatabase } from '../persistence/sql.ts';
 import { InMemoryReportStore, type ReportStore } from '../reporting/store.ts';
@@ -87,10 +87,10 @@ export async function composeApplication(config: AppConfig, overrides: ComposeOv
     missing.push('condition-monitoring adapter (not implemented; only synthetic profiles exist)');
     throw new Error(`RAILMIND_MODE=production cannot start: ${missing.join('; ')}. Synthetic fallback is refused in production.`);
   }
-  maximo = overrides.maximo ?? new MockMaximoReadPort({ assets: DEMO_ASSETS, workOrders: DEMO_WORK_ORDERS, preventiveMaintenance: DEMO_PM_RECORDS });
+  maximo = overrides.maximo ?? new MockMaximoReadPort({ assets: DEMO_ASSETS, workOrders: DEMO_WORK_ORDERS, preventiveMaintenance: DEMO_PM_RECORDS, invoices: DEMO_INVOICES });
   contract = new InMemoryContractReadPort([DEMO_CONTRACT_KPI_SET]);
   condition = new InMemoryConditionReadPort(DEMO_CONDITION_PROFILES);
-  providers = createSyntheticProviders({ assets: DEMO_ASSETS, workOrders: DEMO_WORK_ORDERS, preventiveMaintenance: DEMO_PM_RECORDS, conditionProfiles: DEMO_CONDITION_PROFILES, kpiSets: [DEMO_CONTRACT_KPI_SET] });
+  providers = createSyntheticProviders({ assets: DEMO_ASSETS, workOrders: DEMO_WORK_ORDERS, preventiveMaintenance: DEMO_PM_RECORDS, conditionProfiles: DEMO_CONDITION_PROFILES, kpiSets: [DEMO_CONTRACT_KPI_SET], invoices: DEMO_INVOICES });
   assertConsistentMode(providers);
   void createMaximoReadProvider; void createContractRepositoryProvider; void MaximoRestClient;
 
