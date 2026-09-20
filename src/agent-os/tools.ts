@@ -53,12 +53,46 @@ export interface ToolInvoker {
   readonly calls: readonly ToolCallRecord[];
 }
 
+/**
+ * Bounded retry for transient source failures. A source that answers with a
+ * server error, a rate limit or a broken connection is retried a small number
+ * of times; every retry is reported so the audit trail shows it. Anything
+ * else (authorisation, malformed data, boundary violations) fails at once.
+ */
+export interface RetryPolicy {
+  maxAttempts: number;
+  sleep?: (ms: number) => Promise<void>;
+  delayMs?: (attempt: number) => number;
+}
+
+export const DEFAULT_RETRY_POLICY: RetryPolicy = { maxAttempts: 3 };
+
+const TRANSIENT = /HTTP (5\d\d|429)|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|fetch failed|socket hang up|network/i;
+
+export function isTransientSourceError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.name === 'SourceUnavailableError') return TRANSIENT.test(error.message);
+  return TRANSIENT.test(error.message);
+}
+
+export interface ScopedInvokerHooks {
+  onCall: (record: ToolCallRecord) => Promise<void>;
+  onRetry?: (record: ToolCallRecord, attempt: number, error: Error) => Promise<void>;
+  retry?: RetryPolicy;
+}
+
+const defaultSleep = (ms: number): Promise<void> => (ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve());
+
 export function createScopedInvoker(
   registry: ToolRegistry,
   plan: AgentExecutionPlan,
-  onCall: (record: ToolCallRecord) => Promise<void>,
+  onCall: ((record: ToolCallRecord) => Promise<void>) | ScopedInvokerHooks,
   now: () => string,
 ): ToolInvoker {
+  const hooks: ScopedInvokerHooks = typeof onCall === 'function' ? { onCall } : onCall;
+  const retry = hooks.retry ?? DEFAULT_RETRY_POLICY;
+  const sleep = retry.sleep ?? defaultSleep;
+  const delayMs = retry.delayMs ?? ((attempt: number) => 150 * attempt);
   const calls: ToolCallRecord[] = [];
   return {
     calls,
@@ -70,8 +104,17 @@ export function createScopedInvoker(
       if (!tool) throw new ToolAccessError(toolId, `Tool ${toolId} is allowed by the catalog but not registered in this deployment.`);
       const record: ToolCallRecord = { toolId, at: now(), summary: tool.summarise(input) };
       calls.push(record);
-      await onCall(record);
-      return tool.invoke(input);
+      await hooks.onCall(record);
+      const maxAttempts = Math.max(1, retry.maxAttempts);
+      for (let attempt = 1; ; attempt += 1) {
+        try {
+          return await tool.invoke(input);
+        } catch (error) {
+          if (attempt >= maxAttempts || !isTransientSourceError(error)) throw error;
+          await hooks.onRetry?.(record, attempt, error as Error);
+          await sleep(delayMs(attempt));
+        }
+      }
     },
   };
 }

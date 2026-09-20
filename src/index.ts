@@ -2,6 +2,7 @@ export * from './agent-os/catalog.ts';
 export * from './agent-os/contracts.ts';
 export * from './agent-os/kernel.ts';
 export * from './agent-os/memory.ts';
+export * from './agent-os/model-guard.ts';
 export * from './agent-os/handlers.ts';
 export * from './agent-os/orchestrator.ts';
 export * from './agent-os/policy.ts';

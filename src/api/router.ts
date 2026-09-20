@@ -266,6 +266,25 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       const record = await deps.runtime.run(scoped, { classification: deps.classification ?? 'synthetic' });
       return { status: record.status === 'completed' ? 200 : record.status === 'blocked' ? 403 : 422, body: record };
     }
+    if (method === 'POST' && path === '/api/agent/sequence') {
+      const body = await readJson(req);
+      const rawTasks = body.tasks;
+      if (!Array.isArray(rawTasks) || rawTasks.length === 0 || rawTasks.length > 8) throw new HttpError(400, 'tasks must be a list of 1 to 8 task specifications.');
+      const tasks: AgentTask[] = [];
+      for (const [index, raw] of rawTasks.entries()) {
+        if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new HttpError(400, `tasks[${index}] must be an object.`);
+        const spec = raw as Record<string, unknown>;
+        const task = buildTask({ ...spec, taskId: str(spec, 'taskId') ?? `T-${Date.parse(now()).toString(36).toUpperCase()}-${index + 1}` }, now(), principal);
+        const context = spec.context;
+        const scoped: AgentTask = typeof context === 'object' && context !== null && !Array.isArray(context) ? { ...task, context: context as Record<string, unknown> } : task;
+        const targetContract = typeof scoped.context?.contractId === 'string' ? scoped.context.contractId : contractScope().id;
+        await require(principal, runPermissionFor(task.capability), 'agent', { type: 'contract', id: targetContract });
+        tasks.push(scoped);
+      }
+      if (!deps.runtime) throw new HttpError(503, 'No agent runtime is configured in this deployment.');
+      const sequence = await deps.runtime.runSequence(tasks, { classification: deps.classification ?? 'synthetic' });
+      return { status: sequence.status === 'completed' ? 200 : 422, body: sequence };
+    }
     if (method === 'GET' && path === '/api/report') {
       await require(principal, 'report.read', 'report', contractScope());
       return { status: 200, body: await reportView() };

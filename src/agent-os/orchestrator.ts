@@ -14,8 +14,9 @@ import type { CapabilityHandler } from './handlers.ts';
 import { createExecutionPlan } from './kernel.ts';
 import type { MemoryStore } from './memory.ts';
 import { hasDecisionGradeEvidence, isOutputReleaseReady } from './policy.ts';
+import { createGuardedModel } from './model-guard.ts';
 import { InMemoryRunStore, type RunStore } from './run-store.ts';
-import { ToolAccessError, ToolRegistry, createScopedInvoker } from './tools.ts';
+import { ToolAccessError, ToolRegistry, createScopedInvoker, type RetryPolicy } from './tools.ts';
 
 /**
  * Agent OS runtime (orchestrator).
@@ -39,12 +40,35 @@ export interface AgentRuntimeDependencies {
   ledger?: DecisionLedger;
   /** Run record store; defaults to in-memory. PostgreSQL keeps records across restarts. */
   runStore?: RunStore;
+  /** Bounded retry for transient source failures (tools) and model calls. */
+  retry?: RetryPolicy;
   now?: () => string;
   runId?: () => string;
 }
 
 export interface RunOptions {
   classification?: DataClassification;
+  /** Ledger id the run's recommendation follows (set by runSequence). */
+  follows?: string;
+  sequenceId?: string;
+}
+
+export type SequenceStatus = 'completed' | 'stopped';
+
+/**
+ * Result of a deterministic chain. The chain is declared by the caller, never
+ * planned by a model; each run is governed exactly like a single run, and the
+ * chain stops at the first run that does not complete.
+ */
+export interface SequenceRecord {
+  sequenceId: string;
+  status: SequenceStatus;
+  runs: readonly AgentRunRecord[];
+  /** Index of the task at which the chain stopped, when it did. */
+  stoppedAt: number | null;
+  reason: string;
+  startedAt: string;
+  completedAt: string;
 }
 
 /** Pulls KPI id to formula version pairs out of a handler value when it carries KPI observations. */
@@ -64,7 +88,9 @@ export class AgentRuntime {
   readonly #runs: RunStore;
   readonly #now: () => string;
   readonly #runId: () => string;
+  readonly #retry: RetryPolicy;
   #counter = 0;
+  #sequenceCounter = 0;
 
   constructor(deps: AgentRuntimeDependencies) {
     this.#deps = deps;
@@ -73,6 +99,7 @@ export class AgentRuntime {
       this.#handlers.set(handler.capability, handler);
     }
     this.#runs = deps.runStore ?? new InMemoryRunStore();
+    this.#retry = deps.retry ?? { maxAttempts: 3 };
     this.#now = deps.now ?? (() => new Date().toISOString());
     this.#runId = deps.runId ?? (() => { this.#counter += 1; return `RUN-${Date.parse(this.#now()).toString(36).toUpperCase()}-${this.#counter}`; });
   }
@@ -100,7 +127,7 @@ export class AgentRuntime {
       return event;
     };
     const finish = async (partial: Omit<AgentRunRecord, 'runId' | 'task' | 'classification' | 'startedAt' | 'completedAt' | 'auditSequences'>): Promise<AgentRunRecord> => {
-      const record: AgentRunRecord = { runId, task, classification, startedAt, completedAt: this.#now(), auditSequences: [...sequences], ...partial };
+      const record: AgentRunRecord = { runId, task, classification, startedAt, completedAt: this.#now(), auditSequences: [...sequences], ...(options.sequenceId ? { sequenceId: options.sequenceId } : {}), ...partial };
       await this.#runs.append(record);
       return record;
     };
@@ -124,13 +151,24 @@ export class AgentRuntime {
     if (plan.agent.mayUseModel && this.#deps.modelGateway) {
       const decision = evaluateModelInvocation(classification, this.#deps.modelPolicy);
       await audit({ action: decision.allowed ? 'model.invoked' : 'model.blocked', at: this.#now(), reason: `${decision.endpoint}: ${decision.reason}` });
-      if (decision.allowed) model = this.#deps.modelGateway;
+      if (decision.allowed) {
+        model = createGuardedModel(this.#deps.modelGateway, {
+          maxAttempts: Math.min(2, this.#retry.maxAttempts),
+          sleep: this.#retry.sleep,
+          delayMs: this.#retry.delayMs,
+          onFailure: async (attempt, error, final) => { await audit({ action: 'model.failed', at: this.#now(), reason: `attempt ${attempt}${final ? ' (final; deterministic fallback)' : ''}: ${error.message}` }); },
+        });
+      }
     }
 
     const toolCalls: ToolCallRecord[] = [];
-    const invoker = createScopedInvoker(this.#deps.tools, plan, async (record) => {
-      toolCalls.push(record);
-      await audit({ action: 'tool.called', at: record.at, reason: `${record.toolId}: ${record.summary}` });
+    const invoker = createScopedInvoker(this.#deps.tools, plan, {
+      onCall: async (record) => {
+        toolCalls.push(record);
+        await audit({ action: 'tool.called', at: record.at, reason: `${record.toolId}: ${record.summary}` });
+      },
+      onRetry: async (record, attempt, error) => { await audit({ action: 'tool.retried', at: this.#now(), reason: `${record.toolId} attempt ${attempt} failed (${error.message}); retrying` }); },
+      retry: this.#retry,
     }, this.#now);
 
     try {
@@ -153,10 +191,12 @@ export class AgentRuntime {
         ? 'Output is grounded; named human approval is required before release.'
         : 'Output is grounded and within the read/analysis boundary.';
       await audit({ action: 'agent.run_completed', at: output.generatedAt, toState: releaseReady ? 'release_ready' : 'awaiting_approval', reason: `${reason} tools=${toolCalls.length} model=${Boolean(result.modelUsed)} evidence=${output.evidence.length}`, evidence: output.evidence.slice(0, 50) });
+      let ledgerId: string | undefined;
       if (this.#deps.ledger) {
         const kpiVersions = extractKpiVersions(result.value);
         const completedEvent = sequences[sequences.length - 1];
-        await this.#deps.ledger.append({ kind: 'recommendation', subjectType: 'run', subjectId: runId, at: output.generatedAt, actorId: task.actorId, payload: { capability: task.capability, agentId: plan.agent.id, goal: task.goal, assumptions: output.assumptions, releaseReady, approvalRequired: plan.policy.approvalRequired, value: output.value }, evidence: output.evidence, kpiVersions, auditSequence: completedEvent });
+        const entry = await this.#deps.ledger.append({ kind: 'recommendation', subjectType: 'run', subjectId: runId, at: output.generatedAt, actorId: task.actorId, payload: { capability: task.capability, agentId: plan.agent.id, goal: task.goal, assumptions: output.assumptions, releaseReady, approvalRequired: plan.policy.approvalRequired, value: output.value, ...(options.sequenceId ? { sequenceId: options.sequenceId } : {}) }, evidence: output.evidence, kpiVersions, auditSequence: completedEvent, follows: options.follows });
+        ledgerId = entry.ledgerId;
       }
       await this.#deps.memoryStore.append({
         id: `${runId}:decision`,
@@ -168,7 +208,7 @@ export class AgentRuntime {
         evidence: output.evidence,
         tags: [task.capability, plan.agent.id, releaseReady ? 'release-ready' : 'awaiting-approval'],
       });
-      return finish({ agentId: plan.agent.id, status: 'completed', toolCalls, modelUsed: Boolean(result.modelUsed), output, approvalRequired: plan.policy.approvalRequired, releaseReady, reason });
+      return finish({ agentId: plan.agent.id, status: 'completed', toolCalls, modelUsed: Boolean(result.modelUsed), output, approvalRequired: plan.policy.approvalRequired, releaseReady, reason, ...(ledgerId ? { ledgerId } : {}) });
     } catch (error) {
       const reason = error instanceof ToolAccessError
         ? `Tool boundary violation: ${error.message}`
@@ -176,5 +216,36 @@ export class AgentRuntime {
       await audit({ action: 'agent.run_failed', at: this.#now(), reason });
       return finish({ agentId: plan.agent.id, status: 'failed', toolCalls, modelUsed: false, output: null, approvalRequired: plan.policy.approvalRequired, releaseReady: false, reason });
     }
+  }
+
+  /**
+   * Deterministic chained runs. The caller declares the chain; the runtime
+   * executes it in order with one governed run per task, links each
+   * recommendation to the previous one in the ledger, shares decision memory
+   * between steps, and stops at the first run that is not completed. No model
+   * plans the chain and no step can widen its own tool boundary.
+   */
+  async runSequence(tasks: readonly AgentTask[], options: RunOptions = {}): Promise<SequenceRecord> {
+    if (tasks.length === 0) throw new Error('A sequence requires at least one task.');
+    this.#sequenceCounter += 1;
+    const sequenceId = options.sequenceId ?? `SEQ-${Date.parse(this.#now()).toString(36).toUpperCase()}-${this.#sequenceCounter}`;
+    const actorId = tasks[0]!.actorId;
+    const startedAt = this.#now();
+    await this.#deps.auditLog.append({ action: 'agent.sequence_started', actorId, subjectType: 'sequence', subjectId: sequenceId, at: startedAt, reason: tasks.map((t) => t.capability).join(' -> ') });
+    const runs: AgentRunRecord[] = [];
+    let follows = options.follows;
+    for (const [index, task] of tasks.entries()) {
+      const record = await this.run(task, { classification: options.classification, follows, sequenceId });
+      runs.push(record);
+      if (record.status !== 'completed') {
+        const reason = `Sequence stopped at step ${index + 1} (${task.capability}): ${record.status}; ${record.reason}`;
+        await this.#deps.auditLog.append({ action: 'agent.sequence_stopped', actorId, subjectType: 'sequence', subjectId: sequenceId, at: this.#now(), reason });
+        return { sequenceId, status: 'stopped', runs, stoppedAt: index, reason, startedAt, completedAt: this.#now() };
+      }
+      follows = record.ledgerId ?? follows;
+    }
+    const reason = `${runs.length} step(s) completed; ${runs.filter((r) => r.approvalRequired).length} await named approval.`;
+    await this.#deps.auditLog.append({ action: 'agent.sequence_completed', actorId, subjectType: 'sequence', subjectId: sequenceId, at: this.#now(), reason });
+    return { sequenceId, status: 'completed', runs, stoppedAt: null, reason, startedAt, completedAt: this.#now() };
   }
 }

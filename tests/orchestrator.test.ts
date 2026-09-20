@@ -11,6 +11,10 @@ import { buildStandardTools } from '../src/agent-os/standard-tools.ts';
 import { ToolRegistry } from '../src/agent-os/tools.ts';
 import { createStandardHandlers } from '../src/agents/index.ts';
 import { InMemoryAuditLog } from '../src/audit/log.ts';
+import { InMemoryDecisionLedger } from '../src/ledger/contracts.ts';
+import type { RetryPolicy } from '../src/agent-os/tools.ts';
+import { SourceUnavailableError } from '../src/providers/contracts.ts';
+import type { MaximoP0Port } from '../src/connectors/maximo/port.ts';
 import { InMemoryConditionReadPort } from '../src/connectors/condition/port.ts';
 import { InMemoryContractReadPort } from '../src/connectors/contract/port.ts';
 import { MockMaximoReadPort } from '../src/connectors/maximo/mock.ts';
@@ -20,13 +24,35 @@ function task(overrides: Partial<AgentTask> = {}): AgentTask {
   return { taskId: 'T-1', actorId: 'engineer-1', goal: 'demo', capability: 'maintenance-kpi', riskClass: 'operational', actionMode: 'analyse', requestedAt: '2026-09-09T10:00:00Z', ...overrides };
 }
 
-function runtime(options: { handlers?: readonly CapabilityHandler[]; model?: ModelGateway | null; baseUrl?: string | null; tools?: ToolRegistry } = {}) {
+const NO_WAIT: RetryPolicy = { maxAttempts: 3, sleep: async () => {} };
+
+function runtime(options: { handlers?: readonly CapabilityHandler[]; model?: ModelGateway | null; baseUrl?: string | null; tools?: ToolRegistry; maximo?: MaximoP0Port; retry?: RetryPolicy } = {}) {
   const auditLog = new InMemoryAuditLog();
   const memoryStore = new InMemoryMemoryStore();
-  const tools = options.tools ?? buildStandardTools({ maximo: new MockMaximoReadPort({ assets: DEMO_ASSETS, workOrders: DEMO_WORK_ORDERS, preventiveMaintenance: DEMO_PM_RECORDS, invoices: DEMO_INVOICES }), contract: new InMemoryContractReadPort([DEMO_CONTRACT_KPI_SET]), condition: new InMemoryConditionReadPort(DEMO_CONDITION_PROFILES), memory: memoryStore });
+  const ledger = new InMemoryDecisionLedger();
+  const maximo = options.maximo ?? new MockMaximoReadPort({ assets: DEMO_ASSETS, workOrders: DEMO_WORK_ORDERS, preventiveMaintenance: DEMO_PM_RECORDS, invoices: DEMO_INVOICES });
+  const tools = options.tools ?? buildStandardTools({ maximo, contract: new InMemoryContractReadPort([DEMO_CONTRACT_KPI_SET]), condition: new InMemoryConditionReadPort(DEMO_CONDITION_PROFILES), memory: memoryStore });
   let tick = 0;
-  const rt = new AgentRuntime({ catalog: AGENT_CATALOG, tools, handlers: options.handlers ?? createStandardHandlers(DEMO_SCOPE), auditLog, memoryStore, modelGateway: options.model ?? null, modelPolicy: { baseUrl: options.baseUrl ?? null, remoteApprovedForInternal: false, remoteApprovedForConfidential: false }, now: () => new Date(Date.parse('2026-09-09T10:00:00Z') + (tick++) * 1000).toISOString() });
-  return { rt, auditLog, memoryStore };
+  const rt = new AgentRuntime({ catalog: AGENT_CATALOG, tools, handlers: options.handlers ?? createStandardHandlers(DEMO_SCOPE), auditLog, memoryStore, ledger, modelGateway: options.model ?? null, modelPolicy: { baseUrl: options.baseUrl ?? null, remoteApprovedForInternal: false, remoteApprovedForConfidential: false }, retry: options.retry ?? NO_WAIT, now: () => new Date(Date.parse('2026-09-09T10:00:00Z') + (tick++) * 1000).toISOString() });
+  return { rt, auditLog, memoryStore, ledger };
+}
+
+/** Maximo port whose work-order listing fails a set number of times before answering. */
+function flakyMaximo(failures: number, message: string): MaximoP0Port & { attempts: number } {
+  const inner = new MockMaximoReadPort({ assets: DEMO_ASSETS, workOrders: DEMO_WORK_ORDERS, preventiveMaintenance: DEMO_PM_RECORDS, invoices: DEMO_INVOICES });
+  const port = {
+    attempts: 0,
+    getAsset: (id: string) => inner.getAsset(id),
+    listPreventiveMaintenance: (id: string) => inner.listPreventiveMaintenance(id),
+    listMeterReadings: (id: string, since?: string) => inner.listMeterReadings(id, since),
+    listInvoices: (id: string, since?: string) => inner.listInvoices(id, since),
+    async listWorkOrders(id: string, since?: string) {
+      port.attempts += 1;
+      if (port.attempts <= failures) throw new SourceUnavailableError('maximo', message);
+      return inner.listWorkOrders(id, since);
+    },
+  };
+  return port;
 }
 
 test('kernel escalates a task to the capability minimum risk class', () => {
@@ -241,4 +267,87 @@ test('finance context stays grounded on an empty invoice set and flags contradic
   assert.equal(record.status, 'completed');
   assert.equal((record.output?.value as { invoiceCount: number }).invoiceCount, 0);
   assert.equal(record.output?.evidence[0]?.entityType, 'invoice-query');
+});
+
+test('model gateway failure never fails a report run: the narrative falls back to the deterministic summary and the failure is audited', async () => {
+  let calls = 0;
+  const failing: ModelGateway = { generate: async () => { calls += 1; throw new Error('HTTP 503 from model endpoint'); } };
+  const { rt, auditLog } = runtime({ model: failing, baseUrl: 'http://127.0.0.1:8080/v1' });
+  const record = await rt.run(task({ capability: 'monthly-report', actionMode: 'draft' }));
+  assert.equal(record.status, 'completed');
+  assert.equal(record.modelUsed, false);
+  assert.equal(calls, 2, 'the guard retries once and then gives up');
+  const value = record.output?.value as { narrativeSource: string; narrative: string };
+  assert.equal(value.narrativeSource, 'deterministic_fallback');
+  assert.ok(value.narrative.length > 0);
+  assert.ok(record.output?.assumptions.some((a) => a.startsWith('Model unavailable (')));
+  const failures = (await auditLog.all()).filter((e) => e.action === 'model.failed');
+  assert.equal(failures.length, 2);
+  assert.ok(failures[1]!.reason.includes('final; deterministic fallback'));
+});
+
+test('transient source errors are retried within the bound and every retry is audited', async () => {
+  const maximo = flakyMaximo(2, 'HTTP 503 Service Unavailable');
+  const { rt, auditLog } = runtime({ maximo });
+  const record = await rt.run(task());
+  assert.equal(record.status, 'completed');
+  const workOrderCalls = record.toolCalls.filter((c) => c.toolId === 'maximo.read' && c.summary.startsWith('workOrders')).length;
+  assert.equal(workOrderCalls, 3, 'one work-order read per in-scope asset');
+  assert.equal(maximo.attempts, workOrderCalls + 2, 'two failed attempts on the first read, then one attempt per read');
+  const retried = (await auditLog.all()).filter((e) => e.action === 'tool.retried');
+  assert.equal(retried.length, 2);
+  assert.ok(retried.every((e) => e.reason.startsWith('maximo.read attempt')));
+});
+
+test('a source that stays unavailable fails the run after the last attempt; a non-transient error fails at once', async () => {
+  const down = flakyMaximo(99, 'HTTP 503 Service Unavailable');
+  const failed = await runtime({ maximo: down }).rt.run(task());
+  assert.equal(failed.status, 'failed');
+  assert.equal(down.attempts, 3);
+  assert.ok(failed.reason.includes('HTTP 503'));
+
+  const forbidden = flakyMaximo(99, 'HTTP 403 Forbidden');
+  const { rt, auditLog } = runtime({ maximo: forbidden });
+  const denied = await rt.run(task());
+  assert.equal(denied.status, 'failed');
+  assert.equal(forbidden.attempts, 1, 'authorisation errors are never retried');
+  assert.ok((await auditLog.all()).every((e) => e.action !== 'tool.retried'));
+});
+
+test('a declared sequence runs each step as a governed run and links the recommendations in the ledger', async () => {
+  const { rt, auditLog, ledger } = runtime();
+  const sequence = await rt.runSequence([
+    task({ taskId: 'S-1', capability: 'data-quality' }),
+    task({ taskId: 'S-2', capability: 'maintenance-kpi' }),
+    task({ taskId: 'S-3', capability: 'exception-analysis' }),
+    task({ taskId: 'S-4', capability: 'executive-briefing', actionMode: 'draft' }),
+  ]);
+  assert.equal(sequence.status, 'completed');
+  assert.equal(sequence.stoppedAt, null);
+  assert.equal(sequence.runs.length, 4);
+  assert.ok(sequence.runs.every((r) => r.status === 'completed' && r.sequenceId === sequence.sequenceId && typeof r.ledgerId === 'string'));
+  const briefing = sequence.runs[3]!;
+  assert.equal((briefing.output?.value as { headline: string }).headline, '3 decision(s) required; 1 critical.');
+  const trace = await ledger.trace(briefing.ledgerId!);
+  assert.deepEqual(trace?.lineage.map((r) => r.ledgerId), sequence.runs.slice(0, 3).map((r) => r.ledgerId));
+  assert.ok((await ledger.get(briefing.ledgerId!))?.follows === sequence.runs[2]!.ledgerId);
+  const actions = (await auditLog.all()).filter((e) => e.subjectType === 'sequence').map((e) => e.action);
+  assert.deepEqual(actions, ['agent.sequence_started', 'agent.sequence_completed']);
+  assert.equal(sequence.reason, '4 step(s) completed; 1 await named approval.');
+});
+
+test('a sequence stops at the first run that is not completed and audits why', async () => {
+  const { rt, auditLog } = runtime();
+  const sequence = await rt.runSequence([
+    task({ taskId: 'S-1', capability: 'maintenance-kpi' }),
+    task({ taskId: 'S-2', capability: 'asset-health', actionMode: 'control' }),
+    task({ taskId: 'S-3', capability: 'exception-analysis' }),
+  ]);
+  assert.equal(sequence.status, 'stopped');
+  assert.equal(sequence.stoppedAt, 1);
+  assert.equal(sequence.runs.length, 2);
+  assert.equal(sequence.runs[1]!.status, 'blocked');
+  assert.ok(sequence.reason.startsWith('Sequence stopped at step 2 (asset-health): blocked'));
+  assert.ok((await auditLog.all()).some((e) => e.action === 'agent.sequence_stopped'));
+  await assert.rejects(() => rt.runSequence([]), /at least one task/);
 });
