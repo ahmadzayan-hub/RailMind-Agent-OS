@@ -123,7 +123,9 @@ export class ControlTowerService {
       decisionRequired: 'Resolve the source data issues before contractual conclusions are drawn.',
       evidence: governed.evidence,
     }] : [];
-    const exceptions = [...readinessExceptions, ...kpiExceptions].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || a.id.localeCompare(b.id));
+    /* Severity first; at equal severity a readiness exception precedes KPI exceptions because unresolved data blocks every conclusion. */
+    const isReadiness = (x: ReportException): number => (x.id.includes(':readiness:') ? 0 : 1);
+    const exceptions = [...readinessExceptions, ...kpiExceptions].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || isReadiness(a) - isReadiness(b) || a.id.localeCompare(b.id));
 
     const report = buildReportPackage({ reportId: this.#seedReport.reportId, cadence: this.#seedReport.cadence, contractId: scope.contractId, periodStart: scope.periodStart, periodEnd: scope.periodEnd, kpis: governed.observations, priorBreachesByKpi: scope.priorBreachesByKpi });
     const stored = await this.#reportStore.get(this.#seedReport.reportId);

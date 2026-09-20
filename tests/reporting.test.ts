@@ -6,7 +6,7 @@ import { deterministicExecutiveSummary } from '../src/reporting/generator.ts';
 import { toControlTowerViewModel } from '../src/control-tower/view-model.ts';
 
 test('builds an exception-based report', () => {
-  assert.equal(DEMO_REPORT.kpis.length, 5);
+  assert.equal(DEMO_REPORT.kpis.length, 6);
   assert.ok(DEMO_REPORT.exceptions.length > 0);
   assert.equal(DEMO_REPORT.status, 'draft');
 });
@@ -17,7 +17,7 @@ test('repeated breach can escalate to critical', () => {
 
 test('control tower counts attention items', () => {
   const view = toControlTowerViewModel(DEMO_REPORT);
-  assert.equal(view.kpiCount, 5);
+  assert.equal(view.kpiCount, 6);
   assert.equal(view.attentionRequired, DEMO_REPORT.exceptions.length);
 });
 

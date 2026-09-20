@@ -123,6 +123,6 @@ test('PgReportStore upserts and reads back the full package', async () => {
   await store.save({ ...DEMO_REPORT, status: 'under_review' });
   const stored = await store.get(DEMO_REPORT.reportId);
   assert.equal(stored?.status, 'under_review');
-  assert.equal(stored?.kpis.length, 5);
+  assert.equal(stored?.kpis.length, 6);
   assert.equal((await store.list()).length, 1);
 });
