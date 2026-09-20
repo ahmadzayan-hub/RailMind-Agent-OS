@@ -46,6 +46,16 @@ Status date: 2026-09-09
 | Forecast governance | Implemented | `src/forecast/budget-forecast.ts` v2: completed-record exclusion, confidence labels, funding gap, backtest, drift monitor, recalibration metadata |
 | Portfolio API and public governance | Implemented | `src/portfolio/*`, `GET /api/portfolio`, synthetic seeded provider, classification guard, retired snapshot fingerprints blocked by `check:portfolio` |
 
+| Contract-context and finance-context | Implemented | `src/agents/contract-context.ts`, `src/agents/finance-context.ts`; orchestrator tests |
+| PM compliance KPI | Implemented (demo formula) | `src/kpi/engine.ts` `pm_compliance_percent`, readiness `missing_completion` |
+| Production adapters | Implemented, fail closed | contract repository JSON export (`repository.ts`), condition-monitoring REST client; `tests/production-adapters.test.ts` |
+| Run persistence, retries, model fallback, sequences | Implemented | `run-store.ts`, `model-guard.ts`, `tools.ts` retry hooks, `runSequence`, `POST /api/agent/sequence` |
+| Multi-report, multi-contract | Implemented | `src/reporting/registry.ts`, `GET /api/reports`, `reportId` on report routes, second synthetic contract |
+| GIS domain (Phase 11) | Implemented on a synthetic schematic | `src/gis/*`, `GET /api/gis`, generated `web/data/gis-pack.js`; no production adapter |
+| Contract digital twin (Phase 12) | Implemented; demo twin `demo_only` | `src/contract-twin/*`, `GET /api/contract-twin`, twins in the repository export |
+| Review sheet and disagreements (Phases 13, 14) | Implemented | `src/review/*`, review routes, approval held by open disagreements, PostgreSQL projections |
+| Private knowledge runtime (Phase 15) | Implemented | `src/knowledge/*`, `knowledge.read`, classification gating, `PgKnowledgeStore`, `GET /api/knowledge` |
+
 ## Release gate
 
 The P0 demo is safe to publish because it uses synthetic data. It is **not approved for live RTA data** until authentication, authorization, data classification, source-system approvals, approved KPI formula definitions, audit retention and environment-specific cybersecurity review are completed.
