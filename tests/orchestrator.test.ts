@@ -45,9 +45,9 @@ test('maintenance KPI run computes the same numbers as the engine, with evidence
   assert.equal(record.agentId, 'maintenance-kpi');
   assert.equal(record.releaseReady, true);
   const value = record.output?.value as { kpis: { id: string; value: number; status: string }[]; workOrderCount: number };
-  assert.equal(value.workOrderCount, 6);
-  assert.deepEqual(value.kpis.map((k) => [k.id, k.value, k.status]), [['availability', 98.522, 'breach'], ['failures', 4, 'within_target'], ['mtbf', 183.25, 'within_target'], ['mttr', 2.75, 'breach'], ['backlog', 3, 'within_target']]);
-  assert.equal(record.output?.evidence.length, 7);
+  assert.equal(value.workOrderCount, 8);
+  assert.deepEqual(value.kpis.map((k) => [k.id, k.value, k.status]), [['availability', 98.522, 'breach'], ['failures', 4, 'within_target'], ['mtbf', 183.25, 'within_target'], ['mttr', 2.75, 'breach'], ['backlog', 3, 'within_target'], ['pm_compliance', 50, 'breach']]);
+  assert.equal(record.output?.evidence.length, 9);
   assert.deepEqual(record.toolCalls.map((c) => c.toolId), ['contract.read', 'maximo.read', 'maximo.read', 'maximo.read']);
   const trail = await auditLog.bySubject('run', record.runId);
   assert.deepEqual(trail.map((e) => e.action), ['agent.run_started', 'tool.called', 'tool.called', 'tool.called', 'tool.called', 'agent.run_completed']);
@@ -100,7 +100,7 @@ test('contractual report run is grounded but not release-ready until approved; d
   assert.equal(record.modelUsed, false);
   const value = record.output?.value as { narrativeSource: string; report: { exceptions: unknown[] } };
   assert.equal(value.narrativeSource, 'deterministic');
-  assert.equal(value.report.exceptions.length, 2);
+  assert.equal(value.report.exceptions.length, 3);
 });
 
 test('model is granted only when policy allows: confidential data and a remote endpoint are blocked', async () => {
@@ -126,8 +126,8 @@ test('executive briefing consumes decision memory produced by a governed excepti
   await rt.run(task({ taskId: 'T-2', capability: 'exception-analysis' }));
   const briefing = await rt.run(task({ taskId: 'T-3', capability: 'executive-briefing', actionMode: 'draft' }));
   const value = briefing.output?.value as { headline: string; decisions: { severity: string; owner: string }[] };
-  assert.equal(value.headline, '2 decision(s) required; 1 critical.');
-  assert.deepEqual(value.decisions.map((d) => [d.severity, d.owner]), [['critical', 'contract-owner'], ['high', 'maintenance-manager']]);
+  assert.equal(value.headline, '3 decision(s) required; 1 critical.');
+  assert.deepEqual(value.decisions.map((d) => [d.severity, d.owner]), [['critical', 'contract-owner'], ['high', 'maintenance-manager'], ['high', 'maintenance-manager']]);
   assert.deepEqual(briefing.toolCalls.map((c) => c.toolId), ['contract.read', 'memory.read']);
   assert.equal(briefing.approvalRequired, true);
 });
@@ -200,7 +200,7 @@ test('contract context copies the approved definition set through contract.read 
   const value = record.output?.value as { contractual: boolean; approvalStatus: string; definitions: { id: string; threshold: number | null; clauseRef: string | null; approvalStatus: string }[]; notEffective: string[]; plannedServiceMinutes: number; assetIds: string[] };
   assert.equal(value.contractual, false);
   assert.equal(value.approvalStatus, 'demo_only');
-  assert.deepEqual(value.definitions.map((d) => d.id), ['availability', 'failures', 'mtbf', 'mttr', 'backlog']);
+  assert.deepEqual(value.definitions.map((d) => d.id), ['availability', 'failures', 'mtbf', 'mttr', 'backlog', 'pm_compliance']);
   assert.equal(value.definitions[0]?.threshold, 99.5);
   assert.match(value.definitions[0]?.clauseRef ?? '', /DEMO-CLAUSE/);
   assert.deepEqual(value.notEffective, []);

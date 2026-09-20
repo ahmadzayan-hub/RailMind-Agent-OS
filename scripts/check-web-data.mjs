@@ -9,7 +9,7 @@ assert.equal(committed, renderDemoPackModule(pack), 'web/data/demo-pack.js has d
 
 assert.equal(pack.provenance.synthetic, true);
 assert.equal(pack.provenance.mode, 'synthetic');
-assert.equal(pack.kpis.length, 5);
+assert.equal(pack.kpis.length, 6);
 assert.ok(pack.timeline.length >= 2, 'Timeline must contain at least one event and the period close.');
 const close = pack.timeline[pack.timeline.length - 1];
 for (const kpi of pack.kpis) {

@@ -82,4 +82,17 @@ export const DEMO_KPI_DEFINITIONS: readonly GovernedKpiDefinition[] = [
     excludedEvents: ['COMP', 'CLOSE', 'CAN'],
     requiredSourceFields: ['workOrderId', 'status'],
   },
+  {
+    id: 'pm_compliance',
+    name: 'PM Compliance',
+    unit: '%',
+    formulaVersion: 'demo-v1',
+    formulaKind: 'pm_compliance_percent',
+    threshold: 90,
+    direction: 'higher_is_better',
+    ...DEMO_GOVERNANCE,
+    includedEvents: ['PM work orders due in the period (target start, else reported date)'],
+    excludedEvents: ['CM', 'CORRECTIVE', 'EM', 'CAN'],
+    requiredSourceFields: ['workOrderId', 'workType', 'status', 'targetStartAt or reportedAt', 'completedAt'],
+  },
 ];

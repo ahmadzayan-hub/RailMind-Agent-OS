@@ -34,6 +34,7 @@ const kpiLabels = {
   mtbf: { ar: 'متوسط الزمن بين الأعطال', en: 'Mean time between failures', precision: 2, icon: '◌' },
   mttr: { ar: 'متوسط زمن الإصلاح', en: 'Mean time to repair', precision: 2, icon: '△' },
   backlog: { ar: 'الأعمال المتراكمة', en: 'Maintenance backlog', precision: 0, icon: '◌' },
+  pm_compliance: { ar: 'الالتزام بالصيانة الوقائية', en: 'PM compliance', precision: 1, icon: '◷' },
 };
 const unitLabels = { '%': { ar: '%', en: '%' }, count: { ar: '', en: '' }, hours: { ar: 'س', en: 'h' }, 'work orders': { ar: 'أمر', en: 'WO' } };
 const assetLabels = {
@@ -401,7 +402,7 @@ function answerText(kind) {
   if (kind === 'evidence') {
     const total = pack.kpis.reduce((sum, k) => sum + k.evidence.length, 0);
     return isAr()
-      ? `كل مؤشر من المؤشرات الخمسة يحمل ${pack.kpis[0].evidence.length} سجلات مصدر (${total} إحالة إجمالاً). بوابة الإرسال للمراجعة: ${pack.approvalGate.blockers.length ? pack.approvalGate.blockers.join(' ') : 'لا موانع'}. لا يتعامل العرض مع بيانات تشغيلية أو تعاقدية حية.`
+      ? `كل مؤشر من المؤشرات ${pack.kpis.length} يحمل ${pack.kpis[0].evidence.length} سجلات مصدر (${total} إحالة إجمالاً). بوابة الإرسال للمراجعة: ${pack.approvalGate.blockers.length ? pack.approvalGate.blockers.join(' ') : 'لا موانع'}. لا يتعامل العرض مع بيانات تشغيلية أو تعاقدية حية.`
       : `Each of the ${pack.kpis.length} KPIs carries ${pack.kpis[0].evidence.length} source records (${total} references in total). Submission gate: ${pack.approvalGate.blockers.length ? pack.approvalGate.blockers.join(' ') : 'no blockers'}. This interface does not handle live operational or contractual data.`;
   }
   if (kind === 'breaches') {

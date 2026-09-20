@@ -141,10 +141,10 @@ test('Control Tower service builds the DTO through the pipeline and reproduces t
   const service = new ControlTowerService(synthetic(), new InMemoryReportStore(), DEMO_REPORT, () => '2026-09-01T00:00:00Z');
   const dto = await service.build(DEMO_SCOPE);
   assert.equal(dto.provenance.synthetic, true);
-  assert.deepEqual(dto.kpis.map((k) => [k.id, k.value, k.status]), [['availability', 98.522, 'breach'], ['failures', 4, 'within_target'], ['mtbf', 183.25, 'within_target'], ['mttr', 2.75, 'breach'], ['backlog', 3, 'within_target']]);
-  assert.deepEqual(dto.exceptions.map((x) => [x.kind, x.severity, x.kpiId]), [['kpi', 'critical', 'mttr'], ['kpi', 'high', 'availability']]);
+  assert.deepEqual(dto.kpis.map((k) => [k.id, k.value, k.status]), [['availability', 98.522, 'breach'], ['failures', 4, 'within_target'], ['mtbf', 183.25, 'within_target'], ['mttr', 2.75, 'breach'], ['backlog', 3, 'within_target'], ['pm_compliance', 50, 'breach']]);
+  assert.deepEqual(dto.exceptions.map((x) => [x.kind, x.severity, x.kpiId]), [['kpi', 'critical', 'mttr'], ['kpi', 'high', 'availability'], ['kpi', 'high', 'pm_compliance']]);
   assert.equal(dto.readiness.state, 'PROVISIONAL');
-  assert.equal(dto.freshness.records, 6);
+  assert.equal(dto.freshness.records, 8);
   assert.equal(dto.timeline[dto.timeline.length - 1]?.trigger, 'PERIOD-CLOSE');
   assert.equal(dto.timeline[dto.timeline.length - 1]?.kpis.find((k) => k.id === 'mtbf')?.value, 183.25);
   assert.equal(dto.report.status, 'draft');

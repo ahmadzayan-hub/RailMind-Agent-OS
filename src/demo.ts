@@ -18,6 +18,8 @@ export const DEMO_WORK_ORDERS: readonly MaximoWorkOrderRecord[] = [
   { workOrderId: 'WO-1004', assetId: 'TRAM-APS-03', workType: 'CM', status: 'INPRG', reportedAt: '2026-08-25T06:00:00Z', actualStartAt: '2026-08-25T06:30:00Z', downtimeMinutes: 210, failureCode: 'POWER' },
   { workOrderId: 'WO-1005', assetId: 'ATC-ZC-01', workType: 'PM', status: 'WAPPR', reportedAt: '2026-08-29T07:00:00Z', downtimeMinutes: 0 },
   { workOrderId: 'WO-1006', assetId: 'TRAM-APS-03', workType: 'PM', status: 'WAPPR', reportedAt: '2026-08-30T07:00:00Z', downtimeMinutes: 0 },
+  { workOrderId: 'WO-1007', assetId: 'ATC-ZC-02', workType: 'PM', status: 'COMP', reportedAt: '2026-08-12T07:00:00Z', targetStartAt: '2026-08-14T00:00:00Z', actualStartAt: '2026-08-13T08:00:00Z', completedAt: '2026-08-13T11:00:00Z', downtimeMinutes: 0 },
+  { workOrderId: 'WO-1008', assetId: 'TRAM-APS-03', workType: 'PM', status: 'COMP', reportedAt: '2026-08-18T07:00:00Z', targetStartAt: '2026-08-20T00:00:00Z', actualStartAt: '2026-08-19T08:00:00Z', completedAt: '2026-08-19T12:30:00Z', downtimeMinutes: 0 },
 ];
 
 const evidence: readonly EvidenceRef[] = DEMO_WORK_ORDERS.map((wo) => ({
