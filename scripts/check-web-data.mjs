@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { buildDemoPack, renderDemoPackModule } from '../src/web/demo-pack.ts';
 import { buildGisPack, renderGisPackModule } from '../src/web/gis-pack.ts';
+import { buildContractTwinPack, renderContractTwinPackModule } from '../src/web/contract-twin-pack.ts';
 
 const target = new URL('../web/data/demo-pack.js', import.meta.url);
 const committed = readFileSync(target, 'utf8');
@@ -36,4 +37,13 @@ for (const node of gis.nodes) {
   if (node.kind === 'work-order') assert.ok(pack.workOrders.some((w) => w.workOrderId === node.refs.workOrderId), `GIS work-order node ${node.nodeId} must point at a pack work order.`);
   if (node.kind === 'train') assert.equal(node.simulated, true, 'train markers are simulated');
 }
-console.log('PASS: web data packs match the Control Tower and GIS services.');
+const twinTarget = new URL('../web/data/contract-twin-pack.js', import.meta.url);
+const twin = await buildContractTwinPack();
+assert.equal(readFileSync(twinTarget, 'utf8'), renderContractTwinPackModule(twin), 'web/data/contract-twin-pack.js has drifted from the contract twin service. Run `npm run build:web-data` and commit the result.');
+assert.equal(twin.approvalStatus, 'demo_only');
+assert.equal(twin.contractual, false, 'the demo twin must never be contractual');
+assert.equal(twin.period.reportId, pack.report.reportId);
+for (const obligation of twin.obligations) {
+  if (obligation.kind === 'kpi' && obligation.status !== 'not_effective') for (const k of obligation.kpis) assert.ok(k.status === 'unavailable' || pack.kpis.some((kpi) => kpi.id === k.kpiId && kpi.value === k.value), `Twin obligation ${obligation.obligationId} must cite the pack value of ${k.kpiId}.`);
+}
+console.log('PASS: web data packs match the Control Tower, GIS and contract twin services.');

@@ -17,6 +17,8 @@ import type { ReportStore } from '../reporting/store.ts';
 import { createReportRegistry, scopeOf, type ReportRegistration, type ReportRegistry } from '../reporting/registry.ts';
 import type { GisReadPort } from '../gis/contracts.ts';
 import { buildGisView } from '../gis/service.ts';
+import type { ContractReadPort } from '../connectors/contract/port.ts';
+import { evaluateContractTwin } from '../contract-twin/service.ts';
 
 /**
  * Local decision API. It mutates RailMind-owned state only (report status,
@@ -55,6 +57,8 @@ export interface ApiDependencies {
   reports?: ReportRegistry;
   /** GIS schematic port (bounded GIS domain). Absent in deployments without a schematic adapter. */
   gis?: GisReadPort;
+  /** Contract repository port, used for the digital twin evaluation. */
+  contract?: ContractReadPort;
 }
 
 /** Structural subset of Node's IncomingMessage/ServerResponse so src/ stays runtime-neutral. */
@@ -338,6 +342,16 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       if (!line) throw new HttpError(404, lineId ? `Schematic line ${lineId} not found.` : 'No schematic line is available.');
       const tower = await deps.controlTower.build(towerScope(registration), undefined, registration.seed);
       return { status: 200, body: buildGisView(line, tower, now()) };
+    }
+    if (method === 'GET' && path === '/api/contract-twin') {
+      const registration = resolveReport(query.get('reportId'));
+      await require(principal, 'report.read', 'contract-twin', contractScope(registration));
+      if (!deps.contract) throw new HttpError(503, 'No contract repository port is configured in this deployment.');
+      if (!deps.controlTower) throw new HttpError(503, 'Control Tower service is not configured.');
+      const twin = await deps.contract.getTwin(registration.seed.contractId);
+      if (!twin) throw new HttpError(404, `The contract repository publishes no digital twin for ${registration.seed.contractId}.`);
+      const tower = await deps.controlTower.build(towerScope(registration), undefined, registration.seed);
+      return { status: 200, body: evaluateContractTwin(twin, tower, now()) };
     }
     if (method === 'GET' && path === '/api/audit') {
       await require(principal, 'audit.read', 'audit');

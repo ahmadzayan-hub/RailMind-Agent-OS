@@ -117,6 +117,8 @@ export async function composeApplication(config: AppConfig, overrides: ComposeOv
     if (!overrides.contract) {
       const unapproved = (contractPort as ReturnType<typeof createDocumentContractReadPort>).sets.filter((set) => set.approvalStatus !== 'approved');
       if (unapproved.length > 0) throw new Error(`RAILMIND_MODE=production cannot start: contract repository sets ${unapproved.map((set) => `${set.contractId}/${set.definitionVersion} (${set.approvalStatus})`).join(', ')} are not approved.`);
+      const unapprovedTwins = (contractPort as ReturnType<typeof createDocumentContractReadPort>).twins.filter((twin) => twin.approvalStatus !== 'approved');
+      if (unapprovedTwins.length > 0) throw new Error(`RAILMIND_MODE=production cannot start: contract twins ${unapprovedTwins.map((twin) => `${twin.contractId}/${twin.twinVersion} (${twin.approvalStatus})`).join(', ')} are not approved.`);
     }
     contract = contractPort;
     const conditionClient = overrides.condition ?? new ConditionMonitoringRestClient({ baseUrl: config.condition.baseUrl as string, apiKey: config.condition.apiKey });
@@ -129,7 +131,7 @@ export async function composeApplication(config: AppConfig, overrides: ComposeOv
     seedReport = buildReportPackage({ reportId: `${scope.contractId}-MONTHLY-${scope.periodEnd.slice(0, 7)}`, cadence: 'monthly', contractId: scope.contractId, periodStart: scope.periodStart, periodEnd: scope.periodEnd, kpis: [] });
   } else {
     maximo = overrides.maximo ?? new MockMaximoReadPort({ assets: DEMO_DATASET.assets, workOrders: DEMO_DATASET.workOrders, preventiveMaintenance: DEMO_DATASET.preventiveMaintenance, invoices: DEMO_DATASET.invoices });
-    contract = new InMemoryContractReadPort(DEMO_DATASET.kpiSets);
+    contract = new InMemoryContractReadPort(DEMO_DATASET.kpiSets, DEMO_DATASET.twins);
     condition = new InMemoryConditionReadPort(DEMO_DATASET.conditionProfiles);
     providers = createSyntheticProviders(DEMO_DATASET);
     scope = config.scope ? { ...config.scope, priorBreachesByKpi: DEMO_SCOPE.priorBreachesByKpi } : DEMO_SCOPE;
@@ -164,7 +166,7 @@ export async function composeApplication(config: AppConfig, overrides: ComposeOv
   const portfolio = new PortfolioService(createSyntheticPortfolioProvider(), { now: overrides.now, publicBuild: config.mode === 'demo' });
 
   return {
-    api: { reportStore, auditLog, memoryStore, seedReport, persistence, runtime, classification: config.classification, now: overrides.now, tokenDirectory: createTokenDirectory(config.usersJson), healthCheck: overrides.database ? async () => { await overrides.database?.query('SELECT 1'); } : undefined, controlTower, scope, mode: providers.mode, ledger, portfolio, reports, gis },
+    api: { reportStore, auditLog, memoryStore, seedReport, persistence, runtime, classification: config.classification, now: overrides.now, tokenDirectory: createTokenDirectory(config.usersJson), healthCheck: overrides.database ? async () => { await overrides.database?.query('SELECT 1'); } : undefined, controlTower, scope, mode: providers.mode, ledger, portfolio, reports, gis, contract },
     runtime,
     providers,
     controlTower,

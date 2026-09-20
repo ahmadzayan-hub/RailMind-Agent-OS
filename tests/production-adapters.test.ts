@@ -101,6 +101,10 @@ test('production mode names every missing adapter and refuses to start until all
   await assert.rejects(() => composeApplication(loadConfig(partial), { database: new SchemaOnlyDatabase(), contractDocument: approvedDocument() }), /cannot start: CONDITION_BASE_URL \(condition-monitoring read adapter\)\. Synthetic/);
   await assert.rejects(() => composeApplication(loadConfig(productionEnv), { database: new SchemaOnlyDatabase(), contractDocument: approvedDocument({ approvalStatus: 'draft' }) }), /C-17\/c17-v2 \(draft\) are not approved/);
   await assert.rejects(() => composeApplication(loadConfig(productionEnv), { database: new SchemaOnlyDatabase(), contractDocument: { schema: 'x' } }), ContractRepositoryDocumentError);
+  const { DEMO_CONTRACT_TWIN } = await import('../src/demo.ts');
+  const { evidence: _evidence, ...twinBody } = DEMO_CONTRACT_TWIN;
+  const draftTwin = { ...twinBody, contractId: CONTRACT, approvalStatus: 'draft', source: { observedAt: '2026-07-01T00:00:00Z' } };
+  await assert.rejects(() => composeApplication(loadConfig(productionEnv), { database: new SchemaOnlyDatabase(), contractDocument: { ...approvedDocument(), twins: [draftTwin] } }), /contract twins C-17\/demo-twin-v1 \(draft\) are not approved/);
   assert.throws(() => loadConfig({ RAILMIND_CONTRACT_ID: 'C-17' }), /must be set together/);
 });
 
