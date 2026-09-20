@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 
 import { GENESIS_HASH } from '../src/audit/log.ts';
 import { DEMO_REPORT } from '../src/demo.ts';
-import { PgAuditLog, PgMemoryStore, PgReportStore, PgReviewStore, PgRunStore, RAILMIND_SCHEMA_SQL, ensureSchema } from '../src/persistence/postgres.ts';
+import { PgAuditLog, PgKnowledgeStore, PgMemoryStore, PgReportStore, PgReviewStore, PgRunStore, RAILMIND_SCHEMA_SQL, ensureSchema } from '../src/persistence/postgres.ts';
+import { DEMO_KNOWLEDGE_DOCUMENTS } from '../src/knowledge/demo-documents.ts';
 import { createComment, raiseDisagreement, recordPosition } from '../src/review/contracts.ts';
 import type { SqlClient, SqlDatabase, SqlRow } from '../src/persistence/sql.ts';
 
@@ -20,6 +21,7 @@ class FakeDatabase implements SqlDatabase {
   readonly runs = new Map<string, SqlRow>();
   readonly comments = new Map<string, SqlRow>();
   readonly disagreements = new Map<string, SqlRow>();
+  readonly knowledge = new Map<string, SqlRow>();
   readonly statements: string[] = [];
   transactions = 0;
   locks = 0;
@@ -60,6 +62,9 @@ class FakeDatabase implements SqlDatabase {
     if (text.includes('FROM railmind_disagreements WHERE disagreement_id')) { const row = this.disagreements.get(String(p[0])); return { rows: row ? [row] : [] }; }
     if (text.includes('FROM railmind_disagreements WHERE report_id')) return { rows: [...this.disagreements.values()].filter((row) => row.report_id === p[0]) };
     if (text.includes('count(*)::int AS n FROM railmind_disagreements')) return { rows: [{ n: this.disagreements.size }] };
+    if (text.includes('INSERT INTO railmind_knowledge_documents')) { this.knowledge.set(String(p[0]), { classification: p[1], document: JSON.parse(String(p[5])) }); return { rows: [] }; }
+    if (text.includes('FROM railmind_knowledge_documents WHERE classification = ANY')) { const allowed = p[0] as string[]; return { rows: [...this.knowledge.entries()].sort(([a], [b]) => a.localeCompare(b)).filter(([, row]) => allowed.includes(String(row.classification))).map(([, row]) => row) }; }
+    if (text.includes('FROM railmind_knowledge_documents WHERE document_id')) { const row = this.knowledge.get(String(p[0])); return { rows: row ? [row] : [] }; }
     if (text.includes('CREATE TABLE IF NOT EXISTS railmind_audit_events')) return { rows: [] };
     throw new Error(`Unexpected SQL: ${text}`);
   }
@@ -173,4 +178,19 @@ test('PgReviewStore upserts comments and disagreements as projections and counts
   assert.equal((await store.listComments('R-2')).length, 0);
   assert.deepEqual(await store.count(), { comments: 1, disagreements: 1 });
   assert.ok(db.statements.some((s) => s.startsWith('INSERT INTO railmind_review_comments')));
+});
+
+test('PgKnowledgeStore gates classification in SQL and ranks like the in-memory store', async () => {
+  const db = new FakeDatabase();
+  const store = new PgKnowledgeStore(db);
+  for (const document of DEMO_KNOWLEDGE_DOCUMENTS) await store.upsert(document);
+  assert.deepEqual(PgKnowledgeStore.allowed('synthetic'), ['synthetic']);
+  assert.deepEqual(PgKnowledgeStore.allowed('confidential'), ['synthetic', 'internal', 'confidential']);
+  const hits = await store.search({ query: 'MTTR repair clock', maxClassification: 'synthetic', limit: 2 });
+  assert.equal(hits[0]?.evidence.entityId, 'KB-DEMO-KPI-GUIDE/P1');
+  assert.equal((await store.list('synthetic')).length, 3);
+  assert.equal((await store.list('internal')).length, 4);
+  assert.equal(await store.get('KB-DEMO-INTERNAL-NOTE', 'synthetic'), null);
+  assert.equal((await store.get('KB-DEMO-INTERNAL-NOTE', 'internal'))?.title, 'Synthetic internal-only note (classification demo)');
+  await assert.rejects(() => store.upsert({ ...DEMO_KNOWLEDGE_DOCUMENTS[0]!, passages: [] }), /at least one passage/);
 });

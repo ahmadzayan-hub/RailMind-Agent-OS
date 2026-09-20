@@ -50,6 +50,8 @@ export class ToolAccessError extends Error {
 
 export interface ToolInvoker {
   call<I, O>(toolId: string, input: I): Promise<O>;
+  /** True when the plan allows the tool and this deployment registers it. Optional tools (knowledge) are skipped when absent. */
+  available(toolId: string): boolean;
   readonly calls: readonly ToolCallRecord[];
 }
 
@@ -96,6 +98,7 @@ export function createScopedInvoker(
   const calls: ToolCallRecord[] = [];
   return {
     calls,
+    available: (toolId) => plan.toolIds.includes(toolId) && registry.has(toolId),
     async call<I, O>(toolId: string, input: I): Promise<O> {
       if (!plan.toolIds.includes(toolId)) {
         throw new ToolAccessError(toolId, `${plan.agent.id} is not allowed to call tool ${toolId}.`);

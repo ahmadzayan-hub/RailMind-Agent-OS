@@ -10,7 +10,7 @@ const url = process.env.DATABASE_URL;
 test('live PostgreSQL adapters (requires DATABASE_URL)', { skip: url ? false : 'DATABASE_URL not set' }, async () => {
   const db = await createPgDatabase(url as string);
   try {
-    await db.query('DROP TABLE IF EXISTS railmind_audit_events, railmind_memory_records, railmind_reports, railmind_ledger, railmind_runs');
+    await db.query('DROP TABLE IF EXISTS railmind_audit_events, railmind_memory_records, railmind_reports, railmind_ledger, railmind_runs, railmind_review_comments, railmind_disagreements, railmind_knowledge_documents');
     await ensureSchema(db);
     const log = new PgAuditLog(db);
     const memory = new PgMemoryStore(db);

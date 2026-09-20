@@ -471,7 +471,7 @@ function renderRunValue(capability, value) {
   if (Array.isArray(value.exceptions)) return `<div class="run-table">${value.exceptions.map((x) => `<span>${status(x.severity)} ${x.title}</span>`).join('') || `<span>${isAr() ? 'لا استثناءات' : 'No exceptions'}</span>`}</div>`;
   if (Array.isArray(value.findings)) return `<div class="run-table"><span><b>${value.recordsChecked}</b> ${isAr() ? 'سجل مفحوص' : 'records checked'} · ${value.provisional ? (isAr() ? 'مؤقت' : 'provisional') : (isAr() ? 'صالح للاستخدام' : 'usable')}</span>${value.findings.map((f) => `<span dir="ltr">${f.severity} · ${f.code} · ${f.workOrderId ?? '—'}</span>`).join('')}</div>`;
   if (Array.isArray(value.decisions)) return `<div class="run-table"><span><b>${value.headline}</b></span>${value.decisions.map((d) => `<span>${status(d.severity)} ${d.title} → <span dir="ltr">${d.owner}</span></span>`).join('')}</div>`;
-  if (value.narrative) return `<div class="run-table"><span><b>${value.report.reportId}</b> · ${value.narrativeSource}</span><span>${value.narrative}</span></div>`;
+  if (value.narrative) return `<div class="run-table"><span><b>${value.report.reportId}</b> · ${value.narrativeSource}</span><span>${value.narrative}</span>${(value.citations ?? []).length ? `<span dir="ltr"><small>${(value.citations ?? []).map((c) => `[${c.ref}] ${c.title}${c.section ? ` · ${c.section}` : ''}`).join(' · ')}</small></span>` : ''}</div>`;
   return `<pre dir="ltr" class="run-raw">${JSON.stringify(value, null, 1).slice(0, 600)}</pre>`;
 }
 
