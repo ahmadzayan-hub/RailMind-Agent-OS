@@ -1,10 +1,12 @@
 import { AGENT_CATALOG } from '../agent-os/catalog.ts';
 import type { ActionMode, AgentTask, DataClassification, HumanApproval, RiskClass } from '../agent-os/contracts.ts';
+import type { EvidenceRef } from '../agent-os/contracts.ts';
 import { createExecutionPlan } from '../agent-os/kernel.ts';
 import type { MemoryStore } from '../agent-os/memory.ts';
 import type { AgentRuntime } from '../agent-os/orchestrator.ts';
 import type { ControlTowerService, TowerScope } from '../app/control-tower-service.ts';
-import { TRANSITION_PERMISSION, hasPermission, inScope, permissionsOf, runPermissionFor, type Permission, type Principal, type Scope } from '../auth/principal.ts';
+import type { PortfolioService } from '../portfolio/service.ts';
+import { PARTIES, TRANSITION_PERMISSION, hasPermission, inScope, permissionsOf, runPermissionFor, type Permission, type Principal, type Scope } from '../auth/principal.ts';
 import type { TokenDirectory } from '../auth/token-directory.ts';
 import { securityHeaders } from '../http/security-headers.ts';
 import type { AuditLog } from '../audit/log.ts';
@@ -13,6 +15,14 @@ import { computeEvidenceVersion, formulaVersionsOf } from '../reporting/evidence
 import { approvalInvalidated, reportReadiness, transitionReport, type ReportTransition } from '../reporting/approval.ts';
 import type { ReportPackage } from '../reporting/contracts.ts';
 import type { ReportStore } from '../reporting/store.ts';
+import { createReportRegistry, scopeOf, type ReportRegistration, type ReportRegistry } from '../reporting/registry.ts';
+import type { GisReadPort } from '../gis/contracts.ts';
+import { buildGisView } from '../gis/service.ts';
+import type { ContractReadPort } from '../connectors/contract/port.ts';
+import { evaluateContractTwin } from '../contract-twin/service.ts';
+import type { ReviewStore } from '../review/store.ts';
+import type { KnowledgeReadPort } from '../knowledge/contracts.ts';
+import { RESOLUTION_OUTCOMES, SUBJECT_TYPES, closeComment, createComment, escalateDisagreement, raiseDisagreement, recordPosition, resolveDisagreement, respondToComment, reviewBlockers, type Party, type ReviewActor, type ReviewSubject, type ReviewTransitionResult } from '../review/contracts.ts';
 
 /**
  * Local decision API. It mutates RailMind-owned state only (report status,
@@ -43,8 +53,20 @@ export interface ApiDependencies {
   ledger?: DecisionLedger;
   /** Control Tower application service and default scope. */
   controlTower?: ControlTowerService;
+  /** Portfolio application service (synthetic in public builds). */
+  portfolio?: PortfolioService;
   scope?: TowerScope;
   mode?: 'synthetic' | 'production';
+  /** Registered report packages (multi-report, multi-contract). Defaults to the seed report alone. */
+  reports?: ReportRegistry;
+  /** GIS schematic port (bounded GIS domain). Absent in deployments without a schematic adapter. */
+  gis?: GisReadPort;
+  /** Contract repository port, used for the digital twin evaluation. */
+  contract?: ContractReadPort;
+  /** Review comment sheet and disagreement state. */
+  reviewStore?: ReviewStore;
+  /** Private knowledge store; retrieval is gated by the deployment classification. */
+  knowledge?: KnowledgeReadPort;
 }
 
 /** Structural subset of Node's IncomingMessage/ServerResponse so src/ stays runtime-neutral. */
@@ -102,6 +124,48 @@ async function readJson(req: ApiRequest): Promise<Record<string, unknown>> {
 function str(body: Record<string, unknown>, key: string): string | undefined {
   const value = body[key];
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+const SOURCE_SYSTEMS: readonly EvidenceRef['sourceSystem'][] = ['maximo', 'maximo_finance', 'contract_repository', 'condition_monitoring', 'inspection', 'manual', 'railmind'];
+
+/** Evidence references supplied by a reviewer: structural checks only; the reference is recorded as given and never verified against the source here. */
+function parseEvidence(body: Record<string, unknown>): readonly EvidenceRef[] {
+  const raw = body.evidence;
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw) || raw.length > 50) throw new HttpError(400, 'evidence must be a list of at most 50 references.');
+  return raw.map((item, index) => {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) throw new HttpError(400, `evidence[${index}] must be an object.`);
+    const ref = item as Record<string, unknown>;
+    const sourceSystem = ref.sourceSystem;
+    if (typeof sourceSystem !== 'string' || !(SOURCE_SYSTEMS as readonly string[]).includes(sourceSystem)) throw new HttpError(400, `evidence[${index}].sourceSystem must be one of ${SOURCE_SYSTEMS.join(', ')}.`);
+    const entityType = str(ref, 'entityType');
+    const entityId = str(ref, 'entityId');
+    const observedAt = str(ref, 'observedAt');
+    if (!entityType || !entityId || !observedAt || Number.isNaN(Date.parse(observedAt))) throw new HttpError(400, `evidence[${index}] requires entityType, entityId and an ISO observedAt.`);
+    return { sourceSystem: sourceSystem as EvidenceRef['sourceSystem'], entityType, entityId, observedAt };
+  });
+}
+
+function parseSubject(body: Record<string, unknown>): ReviewSubject {
+  const raw = body.subject;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new HttpError(400, 'subject must be an object with type and id.');
+  const subject = raw as Record<string, unknown>;
+  const type = str(subject, 'type');
+  const id = str(subject, 'id');
+  if (!type || !(SUBJECT_TYPES as readonly string[]).includes(type) || !id) throw new HttpError(400, `subject.type must be one of ${SUBJECT_TYPES.join(', ')} and subject.id is required.`);
+  return { type: type as ReviewSubject['type'], id };
+}
+
+/** The party a principal speaks for: its declared party, else the party named in the request (administrators). */
+function partyOf(principal: Principal, body: Record<string, unknown>): Party {
+  if (principal.party) return principal.party;
+  const declared = str(body, 'party');
+  if (!declared || !(PARTIES as readonly string[]).includes(declared)) throw new HttpError(400, `This principal has no declared party; the request must name party as one of ${PARTIES.join(', ')}.`);
+  return declared as Party;
+}
+
+function reviewActor(principal: Principal, party: Party): ReviewActor {
+  return { principalId: principal.principalId, role: principal.role, party };
 }
 
 function buildTransition(body: Record<string, unknown>, now: string, principal: Principal, evidenceVersion: string): ReportTransition {
@@ -179,23 +243,34 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
     }
   }
 
-  const contractScope = (): Scope => ({ type: 'contract', id: deps.scope?.contractId ?? deps.seedReport.contractId });
+  const registry: ReportRegistry = deps.reports ?? createReportRegistry([{ seed: deps.seedReport, ...(deps.scope?.priorBreachesByKpi ? { priorBreachesByKpi: deps.scope.priorBreachesByKpi } : {}) }]);
+  const contractScope = (registration: ReportRegistration = registry.default): Scope => ({ type: 'contract', id: registration.seed.contractId });
+  /** The scope a registered package is computed for; the deployment scope keeps precedence for the default package. */
+  const towerScope = (registration: ReportRegistration): TowerScope => (registration === registry.default && deps.scope ? deps.scope : scopeOf(registration));
 
-  async function currentReport(): Promise<ReportPackage> {
-    const stored = await deps.reportStore.get(deps.seedReport.reportId);
+  /** Resolves the package a request addresses: an explicit reportId, else the default package. Unknown ids are refused. */
+  function resolveReport(reportId: string | null | undefined): ReportRegistration {
+    if (reportId === null || reportId === undefined || reportId === '') return registry.default;
+    const found = registry.get(reportId);
+    if (!found) throw new HttpError(404, `Report ${reportId} is not registered in this deployment.`);
+    return found;
+  }
+
+  async function currentReport(registration: ReportRegistration = registry.default): Promise<ReportPackage> {
+    const stored = await deps.reportStore.get(registration.seed.reportId);
     if (stored) return stored;
-    await deps.reportStore.save(deps.seedReport);
-    return deps.seedReport;
+    await deps.reportStore.save(registration.seed);
+    return registration.seed;
   }
 
   /** The package's live KPI observations (through the governed pipeline when the service is configured). */
-  async function currentKpis(): Promise<ReportPackage['kpis']> {
-    if (deps.controlTower && deps.scope) {
-      const dto = await deps.controlTower.build(deps.scope);
-      const stored = await currentReport();
+  async function currentKpis(registration: ReportRegistration = registry.default): Promise<ReportPackage['kpis']> {
+    if (deps.controlTower) {
+      const dto = await deps.controlTower.build(towerScope(registration), undefined, registration.seed);
+      const stored = await currentReport(registration);
       return stored.kpis.length === dto.kpis.length ? stored.kpis.map((kpi) => { const live = dto.kpis.find((k) => k.id === kpi.definition.id); return live ? { ...kpi, value: live.value, status: live.status, readiness: live.readiness, decisionGrade: live.decisionGrade, evidence: live.evidence.map((e) => ({ sourceSystem: e.sourceSystem, entityType: e.entityType, entityId: e.entityId, observedAt: e.observedAt })) } : kpi; }) : stored.kpis;
     }
-    return (await currentReport()).kpis;
+    return (await currentReport(registration)).kpis;
   }
 
   async function ledgerAppend(input: Parameters<DecisionLedger['append']>[0]): Promise<void> {
@@ -208,9 +283,9 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
    * package changes, the package is superseded automatically and audited.
    * Policy does not allow a stale approval to stand.
    */
-  async function reconcileApproval(): Promise<{ report: ReportPackage; evidenceVersion: string }> {
-    const stored = await currentReport();
-    const kpis = await currentKpis();
+  async function reconcileApproval(registration: ReportRegistration = registry.default): Promise<{ report: ReportPackage; evidenceVersion: string }> {
+    const stored = await currentReport(registration);
+    const kpis = await currentKpis(registration);
     const evidenceVersion = await computeEvidenceVersion(kpis);
     if (!approvalInvalidated(stored, evidenceVersion)) return { report: stored, evidenceVersion };
     const result = transitionReport({ ...stored, kpis }, { type: 'supersede', actorId: 'system.evidence-monitor', actorRole: 'system', at: now(), reason: `Underlying evidence changed (${(stored.approval?.evidenceVersion ?? stored.evidenceVersion ?? '').slice(0, 12)} -> ${evidenceVersion.slice(0, 12)}); approval invalidated by policy.`, newEvidenceVersion: evidenceVersion });
@@ -222,11 +297,38 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
     return { report: result.ok ? result.report : stored, evidenceVersion };
   }
 
-  async function reportView(): Promise<unknown> {
-    const { report, evidenceVersion } = await reconcileApproval();
+  /** Approval blockers raised by the review layer: an open disagreement holds the package. */
+  async function openDisagreementBlockers(reportId: string): Promise<readonly string[]> {
+    if (!deps.reviewStore) return [];
+    return reviewBlockers(await deps.reviewStore.listDisagreements(reportId));
+  }
+
+  async function reportView(registration: ReportRegistration = registry.default): Promise<unknown> {
+    const { report, evidenceVersion } = await reconcileApproval(registration);
     const audit = await deps.auditLog.bySubject('report', report.reportId);
     const ledger = deps.ledger ? await deps.ledger.bySubject('report', report.reportId) : [];
-    return { report, readiness: reportReadiness(report, evidenceVersion), evidenceVersion, audit, ledger, persistence: deps.persistence };
+    const readiness = reportReadiness(report, evidenceVersion);
+    const review = await openDisagreementBlockers(report.reportId);
+    return { report, readiness: review.length ? { ...readiness, blockers: [...readiness.blockers, ...review] } : readiness, evidenceVersion, audit, ledger, persistence: deps.persistence };
+  }
+
+  async function reviewView(registration: ReportRegistration): Promise<unknown> {
+    if (!deps.reviewStore) throw new HttpError(503, 'No review store is configured in this deployment.');
+    const reportId = registration.seed.reportId;
+    const [comments, disagreements] = await Promise.all([deps.reviewStore.listComments(reportId), deps.reviewStore.listDisagreements(reportId)]);
+    return { reportId, contractId: registration.seed.contractId, comments, disagreements, approvalBlockers: reviewBlockers(disagreements), persistence: deps.persistence };
+  }
+
+  async function recordReview<T>(result: ReviewTransitionResult<T>, save: (record: T) => Promise<void>): Promise<{ status: number; body: unknown }> {
+    const audit = await deps.auditLog.append(result.audit);
+    if (result.ok) await save(result.record);
+    return { status: result.ok ? 200 : 409, body: { ok: result.ok, blockers: result.blockers, record: result.record, audit } };
+  }
+
+  async function reviewRegistration(reportId: string | undefined, principal: Principal, permission: Permission): Promise<ReportRegistration> {
+    const registration = resolveReport(reportId);
+    await require(principal, permission, registration.seed.reportId, contractScope(registration));
+    return registration;
   }
 
   async function route(method: string, path: string, req: ApiRequest): Promise<{ status: number; body: unknown }> {
@@ -250,7 +352,7 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
     }
     if (method === 'GET' && path === '/api/runs') {
       await require(principal, 'runs.read', 'runs');
-      return { status: 200, body: { runs: deps.runtime?.runs() ?? [] } };
+      return { status: 200, body: { runs: deps.runtime ? await deps.runtime.runs() : [], persistence: deps.persistence } };
     }
     if (method === 'POST' && path === '/api/agent/run') {
       const body = await readJson(req);
@@ -263,16 +365,161 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       const record = await deps.runtime.run(scoped, { classification: deps.classification ?? 'synthetic' });
       return { status: record.status === 'completed' ? 200 : record.status === 'blocked' ? 403 : 422, body: record };
     }
+    if (method === 'POST' && path === '/api/agent/sequence') {
+      const body = await readJson(req);
+      const rawTasks = body.tasks;
+      if (!Array.isArray(rawTasks) || rawTasks.length === 0 || rawTasks.length > 8) throw new HttpError(400, 'tasks must be a list of 1 to 8 task specifications.');
+      const tasks: AgentTask[] = [];
+      for (const [index, raw] of rawTasks.entries()) {
+        if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new HttpError(400, `tasks[${index}] must be an object.`);
+        const spec = raw as Record<string, unknown>;
+        const task = buildTask({ ...spec, taskId: str(spec, 'taskId') ?? `T-${Date.parse(now()).toString(36).toUpperCase()}-${index + 1}` }, now(), principal);
+        const context = spec.context;
+        const scoped: AgentTask = typeof context === 'object' && context !== null && !Array.isArray(context) ? { ...task, context: context as Record<string, unknown> } : task;
+        const targetContract = typeof scoped.context?.contractId === 'string' ? scoped.context.contractId : contractScope().id;
+        await require(principal, runPermissionFor(task.capability), 'agent', { type: 'contract', id: targetContract });
+        tasks.push(scoped);
+      }
+      if (!deps.runtime) throw new HttpError(503, 'No agent runtime is configured in this deployment.');
+      const sequence = await deps.runtime.runSequence(tasks, { classification: deps.classification ?? 'synthetic' });
+      return { status: sequence.status === 'completed' ? 200 : 422, body: sequence };
+    }
+    if (method === 'GET' && path === '/api/reports') {
+      await require(principal, 'report.read', 'reports');
+      const visible = registry.list().filter((registration) => inScope(principal, contractScope(registration)));
+      const reports = [];
+      for (const registration of visible) {
+        const { report, evidenceVersion } = await reconcileApproval(registration);
+        reports.push({ reportId: report.reportId, cadence: report.cadence, contractId: report.contractId, periodStart: report.periodStart, periodEnd: report.periodEnd, status: report.status, readiness: reportReadiness(report, evidenceVersion), evidenceVersion, isDefault: registration === registry.default });
+      }
+      return { status: 200, body: { reports, contractIds: [...new Set(reports.map((r) => r.contractId))], persistence: deps.persistence } };
+    }
     if (method === 'GET' && path === '/api/report') {
-      await require(principal, 'report.read', 'report', contractScope());
-      return { status: 200, body: await reportView() };
+      const registration = resolveReport(query.get('reportId'));
+      await require(principal, 'report.read', registration.seed.reportId, contractScope(registration));
+      return { status: 200, body: await reportView(registration) };
     }
     if (method === 'GET' && path === '/api/control-tower') {
-      await require(principal, 'report.read', 'control-tower', contractScope());
-      if (!deps.controlTower || !deps.scope) throw new HttpError(503, 'Control Tower service is not configured.');
+      const requestedContract = query.get('contractId');
+      const registration = query.get('reportId') ? resolveReport(query.get('reportId')) : requestedContract ? (registry.forContract(requestedContract)[0] ?? null) : registry.default;
+      if (!registration) throw new HttpError(404, `No report package is registered for contract ${requestedContract}.`);
+      await require(principal, 'report.read', 'control-tower', contractScope(registration));
+      if (!deps.controlTower) throw new HttpError(503, 'Control Tower service is not configured.');
       const asOf = query.get('asOf') ?? undefined;
       if (asOf !== undefined && Number.isNaN(Date.parse(asOf))) throw new HttpError(400, 'asOf must be an ISO timestamp.');
-      return { status: 200, body: await deps.controlTower.build(deps.scope, asOf) };
+      return { status: 200, body: await deps.controlTower.build(towerScope(registration), asOf, registration.seed) };
+    }
+    if (method === 'GET' && path === '/api/gis') {
+      const registration = resolveReport(query.get('reportId'));
+      await require(principal, 'report.read', 'gis', contractScope(registration));
+      if (!deps.gis) throw new HttpError(503, 'No GIS schematic adapter is configured in this deployment.');
+      if (!deps.controlTower) throw new HttpError(503, 'Control Tower service is not configured.');
+      const lineId = query.get('lineId');
+      const line = lineId ? await deps.gis.getLine(lineId) : (await deps.gis.listLines())[0] ?? null;
+      if (!line) throw new HttpError(404, lineId ? `Schematic line ${lineId} not found.` : 'No schematic line is available.');
+      const tower = await deps.controlTower.build(towerScope(registration), undefined, registration.seed);
+      return { status: 200, body: buildGisView(line, tower, now()) };
+    }
+    if (method === 'GET' && path === '/api/contract-twin') {
+      const registration = resolveReport(query.get('reportId'));
+      await require(principal, 'report.read', 'contract-twin', contractScope(registration));
+      if (!deps.contract) throw new HttpError(503, 'No contract repository port is configured in this deployment.');
+      if (!deps.controlTower) throw new HttpError(503, 'Control Tower service is not configured.');
+      const twin = await deps.contract.getTwin(registration.seed.contractId);
+      if (!twin) throw new HttpError(404, `The contract repository publishes no digital twin for ${registration.seed.contractId}.`);
+      const tower = await deps.controlTower.build(towerScope(registration), undefined, registration.seed);
+      return { status: 200, body: evaluateContractTwin(twin, tower, now()) };
+    }
+    if (method === 'GET' && path === '/api/review') {
+      const registration = await reviewRegistration(query.get('reportId') ?? undefined, principal, 'report.read');
+      return { status: 200, body: await reviewView(registration) };
+    }
+    if (method === 'POST' && path === '/api/review/comment') {
+      const body = await readJson(req);
+      const registration = await reviewRegistration(str(body, 'reportId'), principal, 'review.comment');
+      if (!deps.reviewStore) throw new HttpError(503, 'No review store is configured in this deployment.');
+      const party = partyOf(principal, body);
+      const subject = parseSubject(body);
+      const counts = await deps.reviewStore.count();
+      const commentId = `CMT-${registration.seed.reportId}-${String(counts.comments + 1).padStart(3, '0')}`;
+      const result = createComment({ commentId, reportId: registration.seed.reportId, contractId: registration.seed.contractId, subject, actor: reviewActor(principal, party), text: str(body, 'text') ?? '', at: now() });
+      return recordReview(result, (record) => deps.reviewStore!.saveComment(record));
+    }
+    if (method === 'POST' && path === '/api/review/comment/transition') {
+      const body = await readJson(req);
+      if (!deps.reviewStore) throw new HttpError(503, 'No review store is configured in this deployment.');
+      const commentId = str(body, 'commentId');
+      const comment = commentId ? await deps.reviewStore.getComment(commentId) : null;
+      if (!comment) throw new HttpError(404, `Comment ${commentId ?? ''} not found.`);
+      await reviewRegistration(comment.reportId, principal, 'review.comment');
+      const actor = reviewActor(principal, partyOf(principal, body));
+      const type = str(body, 'type');
+      if (type === 'respond') return recordReview(respondToComment(comment, actor, str(body, 'text') ?? '', now()), (record) => deps.reviewStore!.saveComment(record));
+      if (type === 'close') return recordReview(closeComment(comment, actor, now()), (record) => deps.reviewStore!.saveComment(record));
+      throw new HttpError(400, 'type must be respond or close.');
+    }
+    if (method === 'POST' && path === '/api/review/disagreement') {
+      const body = await readJson(req);
+      const registration = await reviewRegistration(str(body, 'reportId'), principal, 'review.comment');
+      if (!deps.reviewStore) throw new HttpError(503, 'No review store is configured in this deployment.');
+      const party = partyOf(principal, body);
+      const subject = parseSubject(body);
+      const evidence = parseEvidence(body);
+      const counts = await deps.reviewStore.count();
+      const disagreementId = `DSG-${registration.seed.reportId}-${String(counts.disagreements + 1).padStart(3, '0')}`;
+      const result = raiseDisagreement({ disagreementId, reportId: registration.seed.reportId, contractId: registration.seed.contractId, subject, summary: str(body, 'summary') ?? '', raisedBy: reviewActor(principal, party), position: { text: str(body, 'text') ?? '', evidence }, at: now() });
+      const audit = await deps.auditLog.append(result.audit);
+      if (!result.ok) return { status: 409, body: { ok: false, blockers: result.blockers, record: result.record, audit } };
+      let ledgerId: string | undefined;
+      if (deps.ledger) {
+        const entry = await deps.ledger.append({ kind: 'disagreement', subjectType: 'disagreement', subjectId: disagreementId, at: now(), actorId: principal.principalId, actorRole: principal.role, payload: { reportId: registration.seed.reportId, subject, summary: result.record.summary, party, position: result.record.positions[party]?.text ?? null }, evidence, kpiVersions: {}, auditSequence: audit.sequence });
+        ledgerId = entry.ledgerId;
+      }
+      const record = ledgerId ? { ...result.record, ledgerId } : result.record;
+      await deps.reviewStore.saveDisagreement(record);
+      return { status: 200, body: { ok: true, blockers: [], record, audit } };
+    }
+    if (method === 'POST' && path === '/api/review/disagreement/transition') {
+      const body = await readJson(req);
+      if (!deps.reviewStore) throw new HttpError(503, 'No review store is configured in this deployment.');
+      const disagreementId = str(body, 'disagreementId');
+      const current = disagreementId ? await deps.reviewStore.getDisagreement(disagreementId) : null;
+      if (!current) throw new HttpError(404, `Disagreement ${disagreementId ?? ''} not found.`);
+      const type = str(body, 'type');
+      const text = str(body, 'text') ?? '';
+      if (type === 'record_position') {
+        await reviewRegistration(current.reportId, principal, 'review.comment');
+        const actor = reviewActor(principal, partyOf(principal, body));
+        return recordReview(recordPosition(current, actor, text, parseEvidence(body), now()), (record) => deps.reviewStore!.saveDisagreement(record));
+      }
+      if (type === 'resolve' || type === 'escalate') {
+        await reviewRegistration(current.reportId, principal, 'review.resolve');
+        const actor = { principalId: principal.principalId, role: principal.role };
+        const outcome = str(body, 'outcome') ?? '';
+        const result = type === 'resolve'
+          ? resolveDisagreement(current, { outcome: outcome as (typeof RESOLUTION_OUTCOMES)[number], text, actor, at: now(), evidence: parseEvidence(body) })
+          : escalateDisagreement(current, actor, text, now());
+        const audit = await deps.auditLog.append(result.audit);
+        if (!result.ok) return { status: 409, body: { ok: false, blockers: result.blockers, record: current, audit } };
+        await deps.reviewStore.saveDisagreement(result.record);
+        if (deps.ledger) await deps.ledger.append({ kind: 'resolution', subjectType: 'disagreement', subjectId: current.disagreementId, at: now(), actorId: principal.principalId, actorRole: principal.role, payload: { reportId: current.reportId, outcome: result.record.resolution?.outcome ?? null, text: result.record.resolution?.text ?? null, positions: { owner: current.positions.owner?.text ?? null, contractor: current.positions.contractor?.text ?? null } }, evidence: result.record.resolution?.evidence ?? [], kpiVersions: {}, follows: current.ledgerId, auditSequence: audit.sequence });
+        return { status: 200, body: { ok: true, blockers: [], record: result.record, audit } };
+      }
+      throw new HttpError(400, 'type must be record_position, resolve or escalate.');
+    }
+    if (method === 'GET' && path === '/api/knowledge') {
+      const contractId = query.get('contractId');
+      await require(principal, 'report.read', 'knowledge', contractId ? { type: 'contract', id: contractId } : undefined);
+      if (!deps.knowledge) throw new HttpError(503, 'No knowledge store is configured in this deployment.');
+      const ceiling = deps.classification ?? 'synthetic';
+      const text = query.get('query');
+      if (!text) return { status: 200, body: { classification: ceiling, documents: await deps.knowledge.list(ceiling), persistence: deps.persistence } };
+      if (text.length > 500) throw new HttpError(400, 'query must be at most 500 characters.');
+      const limitRaw = query.get('limit');
+      const limit = limitRaw ? Number(limitRaw) : undefined;
+      if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 20)) throw new HttpError(400, 'limit must be an integer between 1 and 20.');
+      const hits = await deps.knowledge.search({ query: text, contractId: contractId ?? undefined, limit, maxClassification: ceiling });
+      return { status: 200, body: { classification: ceiling, query: text, contractId: contractId ?? null, hits, persistence: deps.persistence } };
     }
     if (method === 'GET' && path === '/api/audit') {
       await require(principal, 'audit.read', 'audit');
@@ -285,10 +532,18 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
     }
     if (method === 'POST' && path === '/api/report/transition') {
       const body = await readJson(req);
-      const { report, evidenceVersion } = await reconcileApproval();
-      const kpis = await currentKpis();
+      const registration = resolveReport(str(body, 'reportId'));
+      const { report, evidenceVersion } = await reconcileApproval(registration);
+      const kpis = await currentKpis(registration);
       const transition = buildTransition(body, now(), principal, evidenceVersion);
-      await require(principal, TRANSITION_PERMISSION[transition.type], deps.seedReport.reportId, contractScope());
+      await require(principal, TRANSITION_PERMISSION[transition.type], registration.seed.reportId, contractScope(registration));
+      if (transition.type === 'approve' || transition.type === 'lock') {
+        const held = await openDisagreementBlockers(report.reportId);
+        if (held.length > 0) {
+          const audit = await deps.auditLog.append({ action: 'report.transition_refused', actorId: principal.principalId, actorRole: principal.role, subjectType: 'report', subjectId: report.reportId, at: now(), fromState: report.status, reason: `${transition.type} refused: ${held.join(' ')}` });
+          return { status: 409, body: { ok: false, blockers: held, audit, report, readiness: { ...reportReadiness(report, evidenceVersion), blockers: held }, evidenceVersion } };
+        }
+      }
       const result = transitionReport({ ...report, kpis }, transition);
       const audit = await deps.auditLog.append(result.audit);
       if (result.ok) {
@@ -300,6 +555,14 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
         status: result.ok ? 200 : 409,
         body: { ok: result.ok, blockers: result.blockers, audit, report: result.report, readiness: reportReadiness(result.report, evidenceVersion), evidenceVersion },
       };
+    }
+    if (method === 'GET' && path === '/api/portfolio') {
+      await require(principal, 'report.read', 'portfolio', { type: 'portfolio', id: 'SYNTHETIC' });
+      if (!deps.portfolio) throw new HttpError(503, 'Portfolio service is not configured.');
+      const asOf = query.get('asOf') ?? now().slice(0, 10);
+      const horizon = query.get('horizon') ?? `${asOf.slice(0, 4)}-12-31`;
+      if (Number.isNaN(Date.parse(asOf)) || Number.isNaN(Date.parse(horizon))) throw new HttpError(400, 'asOf and horizon must be ISO dates.');
+      return { status: 200, body: await deps.portfolio.build(asOf, horizon) };
     }
     if (method === 'GET' && path === '/api/ledger') {
       await require(principal, 'ledger.read', 'ledger', contractScope());
@@ -318,23 +581,25 @@ export function createApiHandler(deps: ApiDependencies): ApiHandler {
       return { status: 200, body: trace };
     }
     if (method === 'POST' && path === '/api/report/reset') {
-      await readJson(req);
-      await require(principal, 'report.reset', deps.seedReport.reportId, contractScope());
+      const body = await readJson(req);
+      const registration = resolveReport(str(body, 'reportId'));
+      const seed = registration.seed;
+      await require(principal, 'report.reset', seed.reportId, contractScope(registration));
       const actorId = principal.principalId;
-      const previous = await currentReport();
-      await deps.reportStore.save(deps.seedReport);
+      const previous = await currentReport(registration);
+      await deps.reportStore.save(seed);
       const audit = await deps.auditLog.append({
         action: 'report.reset',
         actorId,
         actorRole: principal.role,
         subjectType: 'report',
-        subjectId: deps.seedReport.reportId,
+        subjectId: seed.reportId,
         at: now(),
         fromState: previous.status,
-        toState: deps.seedReport.status,
-        reason: 'Demo package restored to its seed state.',
+        toState: seed.status,
+        reason: 'Package restored to its seed state.',
       });
-      return { status: 200, body: { ok: true, audit, report: deps.seedReport, readiness: reportReadiness(deps.seedReport) } };
+      return { status: 200, body: { ok: true, audit, report: seed, readiness: reportReadiness(seed) } };
     }
     if (method === 'POST' && path === '/api/agent/task') {
       await require(principal, 'agent.plan', 'agent', contractScope());

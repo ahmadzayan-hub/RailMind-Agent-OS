@@ -1,44 +1,41 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { buildPortfolioPack, renderPortfolioPackModule } from '../src/web/portfolio-pack.ts';
+import { generateSyntheticPortfolio } from '../src/portfolio/synthetic.ts';
 
-const file = new URL('../web/portfolio.html', import.meta.url);
-const html = readFileSync(file, 'utf8');
+const html = readFileSync(new URL('../web/portfolio.html', import.meta.url), 'utf8');
+const js = readFileSync(new URL('../web/portfolio.js', import.meta.url), 'utf8');
+const packSource = readFileSync(new URL('../web/data/portfolio-pack.js', import.meta.url), 'utf8');
+
+// 1. Privacy boundary: no organisation, vendor, project or source-system identifiers in the public workspace.
 const restricted = /(?<![A-Z0-9])(?:RTA|RMD|DUBAI|METRO|TRAM|HITATCHI|ALSTOM|WSP|SENER|TTE|AVALON|SHARAF|WINSTAR|WAAGNER|TUV|THYSSENKRUPP|ENOVA|WILO|HEAD QUARTER|GROUP 4|G4S|KINKISHARYO|JEBEL|BUSINESS BAY|ONPASSIVE|QDP|JDP|OVPD|RAA\/RMD|RA\/RM|MAXIMO)(?![A-Z0-9])/i;
-assert.equal(restricted.test(html), false, 'Portfolio workspace contains a restricted identifier.');
-assert.equal(/<script\s+src=/i.test(html), false, 'Portfolio workspace must remain local and dependency-free.');
-
-const cellsMatch = html.match(/const cells=(\[.*?\]);\nconst forecastMeta=/s);
-const metaMatch = html.match(/const forecastMeta=(\{.*?\});\nconst state=/s);
-const scriptMatch = html.match(/<script>\n([\s\S]*?)\n<\/script>/);
-assert.ok(cellsMatch?.[1], 'Embedded aggregate cells are missing.');
-assert.ok(metaMatch?.[1], 'Forecast metadata is missing.');
-assert.ok(scriptMatch?.[1], 'Embedded dashboard script is missing.');
-assert.match(html, /id="forecast-scenario-controls"/, 'Scenario selector is missing.');
-assert.match(html, /data-forecast-scenario/, 'Scenario selector interactions are missing.');
-assert.match(html, /data-forecast-area/, 'Business-area scenario interactions are missing.');
-assert.match(html, /function renderForecastDetail/, 'Scenario detail renderer is missing.');
-new Function(scriptMatch[1]);
-
-const cells = JSON.parse(cellsMatch[1]);
-const meta = JSON.parse(metaMatch[1]);
-const total = (key) => cells.reduce((sum, cell) => sum + Number(cell[key] ?? 0), 0);
-assert.equal(cells.length, 10);
-assert.equal(total('count'), 30);
-assert.equal(Number(total('totalCost').toFixed(2)), 364969387.46);
-assert.equal(Number(total('expenditure').toFixed(2)), 72805360.17);
-assert.equal(total('forecastEligibleCount'), 14);
-assert.equal(Number(total('forecastP25').toFixed(2)), 11706580.01);
-assert.equal(Number(total('forecastP50').toFixed(2)), 15067608.17);
-assert.equal(Number(total('forecastP75').toFixed(2)), 35491353.46);
-assert.equal(meta.asOf, '2026-09-09');
-assert.equal(meta.horizon, '2026-12-31');
-assert.equal(meta.sampleSize, 10);
-assert.ok(meta.paceP25 <= meta.paceP50 && meta.paceP50 <= meta.paceP75);
-for (const cell of cells) {
-  assert.deepEqual(Object.keys(cell).sort(), [
-    'awardStatus', 'budget2026', 'businessArea', 'count', 'expenditure',
-    'forecastEligibleBudget', 'forecastEligibleCount', 'forecastP25', 'forecastP50',
-    'forecastP75', 'portfolio', 'totalCost',
-  ]);
+for (const [name, text] of [['portfolio.html', html], ['portfolio.js', js], ['portfolio-pack.js', packSource]]) {
+  assert.equal(restricted.test(text), false, `${name} contains a restricted identifier.`);
 }
-console.log('PASS: portfolio aggregates, forecast scenarios, privacy boundary, and embedded JavaScript verified.');
+
+// 2. Known real aggregate fingerprints from the retired embedded snapshot must never reappear.
+const retiredFingerprints = ['364969387', '72805360', '122403998', '11706580', '15067608', '35491353', '0.44737723965408616', '0.5660501300389731', '0.8301974534532033'];
+for (const [name, text] of [['portfolio.html', html], ['portfolio.js', js], ['portfolio-pack.js', packSource]]) {
+  for (const fingerprint of retiredFingerprints) assert.equal(text.includes(fingerprint), false, `${name} contains retired real aggregate ${fingerprint}.`);
+}
+
+// 3. Local, dependency-free: scripts may only be local module files.
+assert.equal(/<script[^>]*src=["'](?!\.\/)/i.test(html), false, 'Portfolio workspace must not load external scripts.');
+assert.equal(/<script>(?!\s*<\/script>)/i.test(html), false, 'Portfolio workspace must not embed inline scripts (CSP).');
+assert.match(html, /SYNTHETIC/, 'Portfolio workspace must carry the synthetic watermark.');
+new Function(js.replace(/^import .*$/gm, '').replace(/^export /gm, ''));
+
+// 4. The static pack equals the service output and is provably synthetic.
+const pack = await buildPortfolioPack();
+assert.equal(packSource, renderPortfolioPackModule(pack), 'web/data/portfolio-pack.js has drifted. Run `npm run build:web-data`.');
+assert.equal(pack.classification, 'PUBLIC_SYNTHETIC');
+assert.equal(pack.mode, 'synthetic');
+assert.equal(pack.totals.initiatives, generateSyntheticPortfolio().length);
+assert.ok(pack.forecastMeta.paceP25 <= pack.forecastMeta.paceP50 && pack.forecastMeta.paceP50 <= pack.forecastMeta.paceP75);
+assert.ok(pack.forecastMeta.excluded.every((e) => e.reason !== undefined));
+assert.equal(pack.forecastMeta.excluded.some((e) => e.reason === 'completed on or before the as-of date') || generateSyntheticPortfolio().every((i) => i.executionEnd > pack.forecastMeta.asOf), true);
+assert.doesNotMatch(pack.forecastMeta.scenarioSemantics, /confidence interval(?!s)/);
+for (const cell of pack.cells) {
+  assert.deepEqual(Object.keys(cell).sort(), ['awardStatus', 'budget2026', 'businessArea', 'committed', 'count', 'expenditure', 'forecastEligibleBudget', 'forecastEligibleCount', 'forecastP25', 'forecastP50', 'forecastP75', 'fundingGapP50', 'portfolio', 'totalCost']);
+}
+console.log('PASS: portfolio workspace is synthetic, dependency-free, privacy-bounded and matches the service.');

@@ -1,6 +1,7 @@
 import type { SourceSystem } from '../agent-os/contracts.ts';
 import type { AssetConditionProfile } from '../connectors/condition/port.ts';
 import type { ContractKpiSet } from '../connectors/contract/port.ts';
+import type { ContractTwin } from '../contract-twin/contracts.ts';
 import type { MaximoAssetRecord, MaximoInvoiceRecord, MaximoPmRecord, MaximoWorkOrderRecord } from '../connectors/maximo/port.ts';
 
 /**
@@ -50,6 +51,7 @@ export interface ContractDataProvider {
   readonly id: string;
   readonly mode: ProviderMode;
   getKpiSet(contractId: string): Promise<ProvidedRecord<ContractKpiSet> | null>;
+  getTwin(contractId: string): Promise<ProvidedRecord<ContractTwin> | null>;
 }
 
 export interface ConditionDataProvider {
@@ -90,6 +92,7 @@ export class SourceUnavailableError extends Error {
   readonly sourceSystem: SourceSystem;
   constructor(sourceSystem: SourceSystem, message: string) {
     super(message);
+    this.name = 'SourceUnavailableError';
     this.sourceSystem = sourceSystem;
   }
 }

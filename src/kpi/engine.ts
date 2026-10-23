@@ -7,7 +7,8 @@ export type KpiFormulaKind =
   | 'failure_count'
   | 'mtbf_hours'
   | 'mttr_hours'
-  | 'backlog_count';
+  | 'backlog_count'
+  | 'pm_compliance_percent';
 
 export interface ExecutableKpiDefinition extends KpiDefinition {
   formulaKind: KpiFormulaKind;
@@ -21,6 +22,8 @@ export interface KpiPeriodInput {
   workOrders: readonly MaximoWorkOrderRecord[];
   failureWorkTypes?: readonly string[];
   closedStatuses?: readonly string[];
+  /** Work types that identify preventive-maintenance orders. */
+  pmWorkTypes?: readonly string[];
 }
 
 function inPeriod(timestamp: string | undefined, start: string, end: string): boolean {
@@ -42,6 +45,27 @@ function repairMinutes(wo: MaximoWorkOrderRecord): number {
   if (!wo.actualStartAt || !wo.completedAt) return 0;
   const diff = Date.parse(wo.completedAt) - Date.parse(wo.actualStartAt);
   return Number.isFinite(diff) && diff > 0 ? diff / 60_000 : 0;
+}
+
+/**
+ * PM schedule compliance: preventive-maintenance work orders due in the
+ * period, completed on or before their due date. Due date is the target start
+ * when Maximo carries one, otherwise the reported date. Nothing due means
+ * nothing missed, so the value is 100.
+ */
+export function pmComplianceOrders(input: KpiPeriodInput): { due: readonly MaximoWorkOrderRecord[]; onTime: readonly MaximoWorkOrderRecord[] } {
+  const pmTypes = new Set((input.pmWorkTypes ?? ['PM']).map((v) => v.toUpperCase()));
+  const closed = new Set((input.closedStatuses ?? ['COMP', 'CLOSE', 'CAN']).map((v) => v.toUpperCase()));
+  const due = input.workOrders.filter((wo) => {
+    if (!wo.workType || !pmTypes.has(wo.workType.toUpperCase())) return false;
+    if (wo.status.toUpperCase() === 'CAN') return false;
+    return inPeriod(wo.targetStartAt ?? wo.reportedAt, input.periodStart, input.periodEnd);
+  });
+  const onTime = due.filter((wo) => {
+    const dueAt = wo.targetStartAt ?? wo.reportedAt;
+    return closed.has(wo.status.toUpperCase()) && Boolean(wo.completedAt) && Boolean(dueAt) && (wo.completedAt as string) <= (dueAt as string);
+  });
+  return { due, onTime };
 }
 
 function round(value: number, digits = 2): number {
@@ -69,6 +93,11 @@ export function computeKpiValue(definition: ExecutableKpiDefinition, input: KpiP
     case 'backlog_count': {
       const closed = new Set((input.closedStatuses ?? ['COMP', 'CLOSE', 'CAN']).map((v) => v.toUpperCase()));
       return input.workOrders.filter((wo) => !closed.has(wo.status.toUpperCase())).length;
+    }
+    case 'pm_compliance_percent': {
+      const { due, onTime } = pmComplianceOrders(input);
+      if (due.length === 0) return 100;
+      return round((onTime.length / due.length) * 100, 1);
     }
   }
 }

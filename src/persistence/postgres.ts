@@ -1,4 +1,9 @@
-import type { EvidenceRef } from '../agent-os/contracts.ts';
+import type { AgentRunRecord, EvidenceRef } from '../agent-os/contracts.ts';
+import type { RunStore } from '../agent-os/run-store.ts';
+import type { ReviewStore } from '../review/store.ts';
+import type { Disagreement, ReviewComment } from '../review/contracts.ts';
+import { CLASSIFICATION_RANK, rankPassages, summariseKnowledgeDocument, validateKnowledgeDocument, withinClassification, type KnowledgeDocument, type KnowledgeDocumentSummary, type KnowledgeHit, type KnowledgeQuery, type KnowledgeStore } from '../knowledge/contracts.ts';
+import type { DataClassification } from '../agent-os/contracts.ts';
 import type { MemoryKind, MemoryRecord, MemoryStore } from '../agent-os/memory.ts';
 import {
   GENESIS_HASH,
@@ -86,6 +91,55 @@ CREATE TABLE IF NOT EXISTS railmind_reports (
   package    JSONB NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS railmind_runs (
+  run_id        TEXT PRIMARY KEY,
+  task_id       TEXT NOT NULL,
+  actor_id      TEXT NOT NULL,
+  capability    TEXT NOT NULL,
+  agent_id      TEXT,
+  status        TEXT NOT NULL,
+  classification TEXT NOT NULL,
+  started_at    TIMESTAMPTZ NOT NULL,
+  completed_at  TIMESTAMPTZ NOT NULL,
+  release_ready BOOLEAN NOT NULL,
+  record        JSONB NOT NULL,
+  recorded_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS railmind_runs_task_idx ON railmind_runs (task_id, started_at);
+DROP TRIGGER IF EXISTS railmind_runs_no_update ON railmind_runs;
+CREATE TRIGGER railmind_runs_no_update
+  BEFORE UPDATE OR DELETE ON railmind_runs
+  FOR EACH ROW EXECUTE FUNCTION railmind_audit_immutable();
+
+CREATE TABLE IF NOT EXISTS railmind_review_comments (
+  comment_id  TEXT PRIMARY KEY,
+  report_id   TEXT NOT NULL,
+  contract_id TEXT NOT NULL,
+  status      TEXT NOT NULL,
+  record      JSONB NOT NULL,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS railmind_review_comments_report_idx ON railmind_review_comments (report_id);
+CREATE TABLE IF NOT EXISTS railmind_disagreements (
+  disagreement_id TEXT PRIMARY KEY,
+  report_id       TEXT NOT NULL,
+  contract_id     TEXT NOT NULL,
+  status          TEXT NOT NULL,
+  record          JSONB NOT NULL,
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS railmind_disagreements_report_idx ON railmind_disagreements (report_id);
+
+CREATE TABLE IF NOT EXISTS railmind_knowledge_documents (
+  document_id    TEXT PRIMARY KEY,
+  classification TEXT NOT NULL,
+  contract_ids   TEXT[] NOT NULL DEFAULT '{}',
+  tags           TEXT[] NOT NULL DEFAULT '{}',
+  version        TEXT NOT NULL,
+  document       JSONB NOT NULL,
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS railmind_knowledge_documents_classification_idx ON railmind_knowledge_documents (classification);
 `;
 
 /** Advisory lock key that serialises audit appends across connections. */
@@ -342,5 +396,145 @@ export class PgDecisionLedger implements DecisionLedger {
   async trace(ledgerId: string): Promise<LedgerTrace | null> {
     const record = await this.get(ledgerId);
     return record ? buildTrace(record, await this.all()) : null;
+  }
+}
+
+function toRunRecord(row: SqlRow): AgentRunRecord {
+  const value = row.record;
+  return (typeof value === 'string' ? JSON.parse(value) : value) as AgentRunRecord;
+}
+
+/** Immutable run records in PostgreSQL; rows are protected by the same append-only trigger as the audit log. */
+export class PgRunStore implements RunStore {
+  readonly #db: SqlClient;
+
+  constructor(db: SqlClient) {
+    this.#db = db;
+  }
+
+  async append(record: AgentRunRecord): Promise<void> {
+    await this.#db.query(
+      `INSERT INTO railmind_runs (run_id, task_id, actor_id, capability, agent_id, status, classification, started_at, completed_at, release_ready, record)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)`,
+      [record.runId, record.task.taskId, record.task.actorId, record.task.capability, record.agentId, record.status, record.classification, record.startedAt, record.completedAt, record.releaseReady, JSON.stringify(record)],
+    );
+  }
+
+  async get(runId: string): Promise<AgentRunRecord | null> {
+    const result = await this.#db.query('SELECT record FROM railmind_runs WHERE run_id = $1', [runId]);
+    return result.rows[0] ? toRunRecord(result.rows[0]) : null;
+  }
+
+  async all(): Promise<readonly AgentRunRecord[]> {
+    const result = await this.#db.query('SELECT record FROM railmind_runs ORDER BY started_at ASC, run_id ASC');
+    return result.rows.map(toRunRecord);
+  }
+}
+
+function jsonColumn<T>(row: SqlRow): T {
+  const raw = row.record;
+  return (typeof raw === 'string' ? JSON.parse(raw) : raw) as T;
+}
+
+/** Review comments and disagreements as mutable projections; every transition is also audited and, for disagreements, ledgered. */
+export class PgReviewStore implements ReviewStore {
+  readonly #db: SqlClient;
+
+  constructor(db: SqlClient) {
+    this.#db = db;
+  }
+
+  async saveComment(comment: ReviewComment): Promise<void> {
+    await this.#db.query(
+      `INSERT INTO railmind_review_comments (comment_id, report_id, contract_id, status, record, updated_at)
+       VALUES ($1, $2, $3, $4, $5::jsonb, now())
+       ON CONFLICT (comment_id) DO UPDATE SET status = EXCLUDED.status, record = EXCLUDED.record, updated_at = now()`,
+      [comment.commentId, comment.reportId, comment.contractId, comment.status, JSON.stringify(comment)],
+    );
+  }
+
+  async getComment(commentId: string): Promise<ReviewComment | null> {
+    const result = await this.#db.query('SELECT record FROM railmind_review_comments WHERE comment_id = $1', [commentId]);
+    return result.rows[0] ? jsonColumn<ReviewComment>(result.rows[0]) : null;
+  }
+
+  async listComments(reportId: string): Promise<readonly ReviewComment[]> {
+    const result = await this.#db.query('SELECT record FROM railmind_review_comments WHERE report_id = $1 ORDER BY comment_id ASC', [reportId]);
+    return result.rows.map((row) => jsonColumn<ReviewComment>(row));
+  }
+
+  async saveDisagreement(disagreement: Disagreement): Promise<void> {
+    await this.#db.query(
+      `INSERT INTO railmind_disagreements (disagreement_id, report_id, contract_id, status, record, updated_at)
+       VALUES ($1, $2, $3, $4, $5::jsonb, now())
+       ON CONFLICT (disagreement_id) DO UPDATE SET status = EXCLUDED.status, record = EXCLUDED.record, updated_at = now()`,
+      [disagreement.disagreementId, disagreement.reportId, disagreement.contractId, disagreement.status, JSON.stringify(disagreement)],
+    );
+  }
+
+  async getDisagreement(disagreementId: string): Promise<Disagreement | null> {
+    const result = await this.#db.query('SELECT record FROM railmind_disagreements WHERE disagreement_id = $1', [disagreementId]);
+    return result.rows[0] ? jsonColumn<Disagreement>(result.rows[0]) : null;
+  }
+
+  async listDisagreements(reportId: string): Promise<readonly Disagreement[]> {
+    const result = await this.#db.query('SELECT record FROM railmind_disagreements WHERE report_id = $1 ORDER BY disagreement_id ASC', [reportId]);
+    return result.rows.map((row) => jsonColumn<Disagreement>(row));
+  }
+
+  async count(): Promise<{ comments: number; disagreements: number }> {
+    const comments = await this.#db.query('SELECT count(*)::int AS n FROM railmind_review_comments');
+    const disagreements = await this.#db.query('SELECT count(*)::int AS n FROM railmind_disagreements');
+    return { comments: Number(comments.rows[0]?.n ?? 0), disagreements: Number(disagreements.rows[0]?.n ?? 0) };
+  }
+}
+
+/**
+ * Knowledge documents in RailMind's own table. Classification gating happens
+ * in SQL (documents above the ceiling are never read) and ranking is the same
+ * deterministic lexical scorer the in-memory store uses.
+ */
+export class PgKnowledgeStore implements KnowledgeStore {
+  readonly #db: SqlClient;
+
+  constructor(db: SqlClient) {
+    this.#db = db;
+  }
+
+  static allowed(ceiling: DataClassification): readonly string[] {
+    return (Object.keys(CLASSIFICATION_RANK) as DataClassification[]).filter((c) => CLASSIFICATION_RANK[c] <= CLASSIFICATION_RANK[ceiling]);
+  }
+
+  async upsert(document: KnowledgeDocument): Promise<void> {
+    const problems = validateKnowledgeDocument(document);
+    if (problems.length > 0) throw new Error(`Knowledge document ${document.documentId}: ${problems.join('; ')}.`);
+    await this.#db.query(
+      `INSERT INTO railmind_knowledge_documents (document_id, classification, contract_ids, tags, version, document, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, now())
+       ON CONFLICT (document_id) DO UPDATE SET classification = EXCLUDED.classification, contract_ids = EXCLUDED.contract_ids, tags = EXCLUDED.tags, version = EXCLUDED.version, document = EXCLUDED.document, updated_at = now()`,
+      [document.documentId, document.classification, [...(document.contractIds ?? [])], [...document.tags], document.version, JSON.stringify(document)],
+    );
+  }
+
+  async #visible(ceiling: DataClassification): Promise<readonly KnowledgeDocument[]> {
+    const result = await this.#db.query('SELECT document FROM railmind_knowledge_documents WHERE classification = ANY($1::text[]) ORDER BY document_id ASC', [PgKnowledgeStore.allowed(ceiling)]);
+    return result.rows.map((row) => { const raw = row.document; return (typeof raw === 'string' ? JSON.parse(raw) : raw) as KnowledgeDocument; });
+  }
+
+  async search(query: KnowledgeQuery): Promise<readonly KnowledgeHit[]> {
+    return rankPassages(await this.#visible(query.maxClassification), query);
+  }
+
+  async get(documentId: string, maxClassification: DataClassification): Promise<KnowledgeDocument | null> {
+    const result = await this.#db.query('SELECT document FROM railmind_knowledge_documents WHERE document_id = $1', [documentId]);
+    const row = result.rows[0];
+    if (!row) return null;
+    const raw = row.document;
+    const document = (typeof raw === 'string' ? JSON.parse(raw) : raw) as KnowledgeDocument;
+    return withinClassification(document, maxClassification) ? document : null;
+  }
+
+  async list(maxClassification: DataClassification): Promise<readonly KnowledgeDocumentSummary[]> {
+    return (await this.#visible(maxClassification)).map(summariseKnowledgeDocument);
   }
 }

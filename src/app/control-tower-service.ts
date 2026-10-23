@@ -102,7 +102,8 @@ export class ControlTowerService {
     this.#now = now ?? (() => new Date().toISOString());
   }
 
-  async build(scope: TowerScope, asOf?: string): Promise<ControlTowerDto> {
+  /** Builds the DTO for a scope. `seed` names the package (id, cadence, seed state) the scope reports into; defaults to the deployment seed. */
+  async build(scope: TowerScope, asOf?: string, seed: ReportPackage = this.#seedReport): Promise<ControlTowerDto> {
     const mode = this.#providers.mode;
     const kpiSet = await this.#providers.contract.getKpiSet(scope.contractId);
     const assetIds = kpiSet?.value.assetIds ?? [];
@@ -123,12 +124,14 @@ export class ControlTowerService {
       decisionRequired: 'Resolve the source data issues before contractual conclusions are drawn.',
       evidence: governed.evidence,
     }] : [];
-    const exceptions = [...readinessExceptions, ...kpiExceptions].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || a.id.localeCompare(b.id));
+    /* Severity first; at equal severity a readiness exception precedes KPI exceptions because unresolved data blocks every conclusion. */
+    const isReadiness = (x: ReportException): number => (x.id.includes(':readiness:') ? 0 : 1);
+    const exceptions = [...readinessExceptions, ...kpiExceptions].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || isReadiness(a) - isReadiness(b) || a.id.localeCompare(b.id));
 
-    const report = buildReportPackage({ reportId: this.#seedReport.reportId, cadence: this.#seedReport.cadence, contractId: scope.contractId, periodStart: scope.periodStart, periodEnd: scope.periodEnd, kpis: governed.observations, priorBreachesByKpi: scope.priorBreachesByKpi });
-    const stored = await this.#reportStore.get(this.#seedReport.reportId);
-    const status = stored?.status ?? this.#seedReport.status;
-    const gateReport: ReportPackage = { ...(stored ?? this.#seedReport), kpis: governed.observations, exceptions };
+    const report = buildReportPackage({ reportId: seed.reportId, cadence: seed.cadence, contractId: scope.contractId, periodStart: scope.periodStart, periodEnd: scope.periodEnd, kpis: governed.observations, priorBreachesByKpi: scope.priorBreachesByKpi });
+    const stored = await this.#reportStore.get(seed.reportId);
+    const status = stored?.status ?? seed.status;
+    const gateReport: ReportPackage = { ...(stored ?? seed), kpis: governed.observations, exceptions };
 
     const kpis: DtoKpi[] = governed.observations.map((o) => {
       const exception = kpiExceptions.find((x) => x.id === `${scope.contractId}:${o.definition.id}:${o.periodEnd}`) ?? null;
@@ -157,6 +160,18 @@ export class ControlTowerService {
       timeline: await this.timeline(scope, allWorkOrders, kpiSet ? { kpiSet, mode } : null),
       agents: AGENT_CATALOG.map((agent) => ({ id: agent.id, name: agent.name, mayUseModel: agent.mayUseModel, allowedActionModes: agent.allowedActionModes })),
     };
+  }
+
+  /**
+   * A report package for the scope built through the governed pipeline, used
+   * as the seed of a deployment whose package does not exist yet. The seed
+   * carries the current observations; the API refreshes them on every read.
+   */
+  async seedPackage(scope: TowerScope, seed: Pick<ReportPackage, 'reportId' | 'cadence'> = this.#seedReport): Promise<ReportPackage> {
+    const kpiSet = await this.#providers.contract.getKpiSet(scope.contractId);
+    const workOrders = await this.#providers.maintenance.listWorkOrders(kpiSet?.value.assetIds ?? [], scope.periodStart);
+    const governed = computeGovernedKpis({ kpiSet, workOrders: workOrders.filter((r) => !r.value.reportedAt || r.value.reportedAt <= scope.periodEnd), periodStart: scope.periodStart, periodEnd: scope.periodEnd, asOf: this.#now(), mode: this.#providers.mode });
+    return buildReportPackage({ reportId: seed.reportId, cadence: seed.cadence, contractId: scope.contractId, periodStart: scope.periodStart, periodEnd: scope.periodEnd, kpis: governed.observations, priorBreachesByKpi: scope.priorBreachesByKpi });
   }
 
   /** Period-to-date replay: each source event re-enters the same pipeline. Synthetic telemetry never edits KPI truth directly. */

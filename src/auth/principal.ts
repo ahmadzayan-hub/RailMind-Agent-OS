@@ -29,7 +29,9 @@ export type Permission =
   | 'audit.read'
   | 'runs.read'
   | 'agents.read'
-  | 'ledger.read';
+  | 'ledger.read'
+  | 'review.comment'
+  | 'review.resolve';
 
 export type ScopeType = 'system' | 'line' | 'asset_group' | 'contract' | 'portfolio' | 'business_area';
 
@@ -39,19 +41,23 @@ export interface Scope {
   id?: string;
 }
 
+/** Which side of the contract a principal speaks for in reviews. Absent for principals that must declare it per action (administrators). */
+export type Party = 'owner' | 'contractor';
+
 export interface Principal {
   principalId: string;
   displayName: string;
   role: Role;
   scopes: readonly Scope[];
+  party?: Party;
 }
 
 const READ: readonly Permission[] = ['report.read', 'audit.read', 'runs.read', 'agents.read', 'ledger.read'];
-const MAINTENANCE: readonly Permission[] = [...READ, 'agent.plan', 'agent.run:maintenance', 'agent.run:asset', 'report.submit'];
-const RELIABILITY: readonly Permission[] = [...READ, 'agent.plan', 'agent.run:asset', 'agent.run:maintenance'];
-const CONTRACT: readonly Permission[] = [...READ, 'agent.plan', 'agent.run:contract', 'agent.run:maintenance', 'report.submit'];
-const FINANCE: readonly Permission[] = [...READ, 'agent.plan', 'agent.run:finance'];
-const APPROVER: readonly Permission[] = [...READ, 'report.approve', 'report.reject', 'report.lock'];
+const MAINTENANCE: readonly Permission[] = [...READ, 'agent.plan', 'agent.run:maintenance', 'agent.run:asset', 'report.submit', 'review.comment'];
+const RELIABILITY: readonly Permission[] = [...READ, 'agent.plan', 'agent.run:asset', 'agent.run:maintenance', 'review.comment'];
+const CONTRACT: readonly Permission[] = [...READ, 'agent.plan', 'agent.run:contract', 'agent.run:maintenance', 'report.submit', 'review.comment'];
+const FINANCE: readonly Permission[] = [...READ, 'agent.plan', 'agent.run:finance', 'review.comment'];
+const APPROVER: readonly Permission[] = [...READ, 'report.approve', 'report.reject', 'report.lock', 'review.comment', 'review.resolve'];
 const ADMIN: readonly Permission[] = [...new Set([...MAINTENANCE, ...RELIABILITY, ...CONTRACT, ...FINANCE, ...APPROVER, 'report.reset' as Permission])];
 
 export const ROLE_PERMISSIONS: Readonly<Record<Role, readonly Permission[]>> = {
@@ -66,6 +72,11 @@ export const ROLE_PERMISSIONS: Readonly<Record<Role, readonly Permission[]>> = {
 
 export const ROLES: readonly Role[] = ['viewer', 'maintenance_engineer', 'reliability_engineer', 'contract_manager', 'finance_reviewer', 'approver', 'administrator'];
 export const SCOPE_TYPES: readonly ScopeType[] = ['system', 'line', 'asset_group', 'contract', 'portfolio', 'business_area'];
+export const PARTIES: readonly Party[] = ['owner', 'contractor'];
+
+export function isParty(value: unknown): value is Party {
+  return typeof value === 'string' && (PARTIES as readonly string[]).includes(value);
+}
 
 export function isRole(value: unknown): value is Role {
   return typeof value === 'string' && (ROLES as readonly string[]).includes(value);

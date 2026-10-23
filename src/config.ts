@@ -14,6 +14,12 @@ export interface AppConfig {
   usersJson: string | null;
   llm: { baseUrl: string | null; model: string; apiKey: string | undefined; remoteApprovedForInternal: boolean; remoteApprovedForConfidential: boolean };
   maximo: { baseUrl: string | null; apiKey: string | undefined; objectStructures: { assets: string; workOrders: string; preventiveMaintenance: string; meters: string; invoices: string } };
+  /** Read-only condition-monitoring REST source (production only). */
+  condition: { baseUrl: string | null; apiKey: string | undefined };
+  /** Path to the approved contract repository export (JSON); read by the host, parsed by the domain. */
+  contractRepositoryPath: string | null;
+  /** Reporting scope: the contract and period the deployment serves. Null selects the synthetic demo scope. */
+  scope: { contractId: string; periodStart: string; periodEnd: string } | null;
 }
 
 type Env = Readonly<Record<string, string | undefined>>;
@@ -52,7 +58,20 @@ export function loadConfig(env: Env): AppConfig {
         invoices: env.MAXIMO_OS_INVOICES?.trim() || 'MXAPIINVOICE',
       },
     },
+    condition: { baseUrl: env.CONDITION_BASE_URL?.trim() || null, apiKey: env.CONDITION_API_KEY?.trim() || undefined },
+    contractRepositoryPath: env.CONTRACT_REPOSITORY_PATH?.trim() || null,
+    scope: scope(env),
   };
+}
+
+function scope(env: Env): AppConfig['scope'] {
+  const contractId = env.RAILMIND_CONTRACT_ID?.trim();
+  const periodStart = env.RAILMIND_PERIOD_START?.trim();
+  const periodEnd = env.RAILMIND_PERIOD_END?.trim();
+  if (!contractId && !periodStart && !periodEnd) return null;
+  if (!contractId || !periodStart || !periodEnd) throw new Error('RAILMIND_CONTRACT_ID, RAILMIND_PERIOD_START and RAILMIND_PERIOD_END must be set together.');
+  if (Number.isNaN(Date.parse(periodStart)) || Number.isNaN(Date.parse(periodEnd)) || periodStart >= periodEnd) throw new Error('RAILMIND_PERIOD_START must be an ISO timestamp before RAILMIND_PERIOD_END.');
+  return { contractId, periodStart, periodEnd };
 }
 
 /** Configuration summary safe to log: no secrets, only which integrations are active. */
@@ -65,5 +84,8 @@ export function describeConfig(config: AppConfig): Record<string, string | numbe
     auth: config.usersJson ? 'token' : 'demo',
     model: config.llm.baseUrl ? `${config.llm.model} @ ${config.llm.baseUrl}` : 'none (deterministic only)',
     maximo: config.maximo.baseUrl ? 'rest (read-only)' : 'mock',
+    condition: config.condition.baseUrl ? 'rest (read-only)' : 'synthetic profiles',
+    contractRepository: config.contractRepositoryPath ? 'document' : 'demo set',
+    scope: config.scope ? `${config.scope.contractId} ${config.scope.periodStart.slice(0, 10)}..${config.scope.periodEnd.slice(0, 10)}` : 'synthetic demo scope',
   };
 }

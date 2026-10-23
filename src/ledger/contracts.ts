@@ -19,11 +19,13 @@ export type LedgerKind =
   | 'supersession'
   | 'outcome'
   | 'corrective_action'
-  | 'report_release';
+  | 'report_release'
+  | 'disagreement'
+  | 'resolution';
 
 export interface LedgerRecordInput {
   kind: LedgerKind;
-  subjectType: 'report' | 'run' | 'asset' | 'exception' | 'proposal';
+  subjectType: 'report' | 'run' | 'asset' | 'exception' | 'proposal' | 'disagreement';
   subjectId: string;
   at: string;
   actorId: string;

@@ -43,3 +43,12 @@ test('observation carries formula version and evidence', () => {
   assert.equal(observation.evidence.length, 1);
   assert.equal(observation.status, 'breach');
 });
+
+test('computes PM compliance from PM orders due in the period, completed by their due date', () => {
+  assert.equal(computeKpiValue(definition('pm_compliance'), input), 50);
+  assert.equal(computeKpiValue(definition('pm_compliance'), { ...input, workOrders: input.workOrders.filter((wo) => wo.workType !== 'PM') }), 100, 'nothing due means nothing missed');
+  const late = input.workOrders.map((wo) => (wo.workOrderId === 'WO-1007' ? { ...wo, completedAt: '2026-08-15T00:00:00Z' } : wo));
+  assert.equal(computeKpiValue(definition('pm_compliance'), { ...input, workOrders: late }), 25);
+  const cancelled = input.workOrders.map((wo) => (wo.workOrderId === 'WO-1005' ? { ...wo, status: 'CAN' } : wo));
+  assert.equal(computeKpiValue(definition('pm_compliance'), { ...input, workOrders: cancelled }), 66.7, 'cancelled PM orders are not due');
+});

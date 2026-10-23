@@ -164,4 +164,8 @@ export interface AgentRunRecord {
   releaseReady: boolean;
   reason: string;
   auditSequences: readonly number[];
+  /** Ledger id of the recommendation record written for a completed run. */
+  ledgerId?: string;
+  /** Sequence this run belongs to, when it was executed as part of a deterministic chain. */
+  sequenceId?: string;
 }

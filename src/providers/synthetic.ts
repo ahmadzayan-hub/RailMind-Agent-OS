@@ -1,5 +1,6 @@
 import type { AssetConditionProfile } from '../connectors/condition/port.ts';
 import type { ContractKpiSet } from '../connectors/contract/port.ts';
+import type { ContractTwin } from '../contract-twin/contracts.ts';
 import type { MaximoAssetRecord, MaximoInvoiceRecord, MaximoPmRecord, MaximoWorkOrderRecord } from '../connectors/maximo/port.ts';
 import type { ConditionDataProvider, ContractDataProvider, DataProviders, FinanceDataProvider, MaintenanceDataProvider, Provenance } from './contracts.ts';
 
@@ -15,6 +16,7 @@ export interface SyntheticDataset {
   conditionProfiles: readonly AssetConditionProfile[];
   kpiSets: readonly ContractKpiSet[];
   invoices?: readonly MaximoInvoiceRecord[];
+  twins?: readonly ContractTwin[];
 }
 
 const INGESTED_AT = '2026-09-01T00:00:00Z';
@@ -45,6 +47,10 @@ export function createSyntheticProviders(dataset: SyntheticDataset): DataProvide
     async getKpiSet(contractId) {
       const set = dataset.kpiSets.find((s) => s.contractId === contractId);
       return set ? { value: set, provenance: { ...provenance('kpi-definition-set', `${set.contractId}/${set.definitionVersion}`, set.evidence.observedAt, 'contract_repository'), qualityState: 'provisional' } } : null;
+    },
+    async getTwin(contractId) {
+      const twin = (dataset.twins ?? []).find((t) => t.contractId === contractId);
+      return twin ? { value: twin, provenance: { ...provenance('contract-twin', `${twin.contractId}/${twin.twinVersion}`, twin.evidence.observedAt, 'contract_repository'), qualityState: 'provisional' } } : null;
     },
   };
   const condition: ConditionDataProvider = {

@@ -1,5 +1,5 @@
 import { sha256Hex } from '../audit/log.ts';
-import { isRole, isScopeType, type Principal, type Role, type Scope } from './principal.ts';
+import { isRole, isScopeType, type Principal, type Role, type Scope, isParty, type Party } from './principal.ts';
 
 /**
  * Bearer-token directory.
@@ -28,6 +28,8 @@ export interface DirectoryEntry {
   role: Role;
   /** Scopes the principal may act within. No scopes means no scoped resource is reachable. */
   scopes: readonly Scope[];
+  /** Optional party the principal speaks for in reviews. */
+  party?: Party;
   tokenSha256: string;
 }
 
@@ -52,6 +54,7 @@ export class StaticTokenDirectory implements TokenDirectory {
         if (!isScopeType(scope.type)) throw new Error(`Unknown scope type for ${entry.principalId}: ${String(scope.type)}`);
         if (scope.type !== 'system' && !(typeof scope.id === 'string' && scope.id.trim())) throw new Error(`Scope ${scope.type} for ${entry.principalId} requires an id.`);
       }
+      if (entry.party !== undefined && !isParty(entry.party)) throw new Error(`Unknown party for ${entry.principalId}: ${String(entry.party)}`);
       if (!/^[0-9a-f]{64}$/.test(entry.tokenSha256)) throw new Error(`tokenSha256 for ${entry.principalId} must be a 64-hex SHA-256.`);
       if (ids.has(entry.principalId)) throw new Error(`Duplicate principalId: ${entry.principalId}`);
       ids.add(entry.principalId);
@@ -64,7 +67,7 @@ export class StaticTokenDirectory implements TokenDirectory {
     const hash = await sha256Hex(token);
     for (const entry of this.#entries) {
       if (constantTimeEqual(entry.tokenSha256, hash)) {
-        return { principalId: entry.principalId, displayName: entry.displayName, role: entry.role, scopes: entry.scopes };
+        return { principalId: entry.principalId, displayName: entry.displayName, role: entry.role, scopes: entry.scopes, ...(entry.party ? { party: entry.party } : {}) };
       }
     }
     return null;
@@ -77,17 +80,18 @@ export class StaticTokenDirectory implements TokenDirectory {
 
 /** Synthetic-preview identities. Tokens are public by design and only valid in demo mode. */
 const DEMO_CONTRACT: Scope = { type: 'contract', id: 'DEMO-CONTRACT' };
+const DEMO_PORTFOLIO: Scope = { type: 'portfolio', id: 'SYNTHETIC' };
 const SYSTEM: Scope = { type: 'system' };
 
 export const DEMO_IDENTITIES: readonly { principal: Principal; token: string }[] = [
   { principal: { principalId: 'demo.viewer', displayName: 'Demo Viewer', role: 'viewer', scopes: [SYSTEM] }, token: 'demo-viewer' },
-  { principal: { principalId: 'demo.engineer', displayName: 'Demo Maintenance Engineer', role: 'maintenance_engineer', scopes: [DEMO_CONTRACT, { type: 'line', id: 'Red Line' }] }, token: 'demo-engineer' },
-  { principal: { principalId: 'demo.reliability', displayName: 'Demo Reliability Engineer', role: 'reliability_engineer', scopes: [DEMO_CONTRACT] }, token: 'demo-reliability' },
-  { principal: { principalId: 'demo.contract', displayName: 'Demo Contract Manager', role: 'contract_manager', scopes: [DEMO_CONTRACT] }, token: 'demo-contract' },
-  { principal: { principalId: 'demo.finance', displayName: 'Demo Finance Reviewer', role: 'finance_reviewer', scopes: [DEMO_CONTRACT] }, token: 'demo-finance' },
-  { principal: { principalId: 'demo.approver', displayName: 'Demo Approver', role: 'approver', scopes: [DEMO_CONTRACT] }, token: 'demo-approver' },
+  { principal: { principalId: 'demo.engineer', displayName: 'Demo Maintenance Engineer', role: 'maintenance_engineer', scopes: [DEMO_CONTRACT, DEMO_PORTFOLIO, { type: 'line', id: 'Red Line' }], party: 'contractor' }, token: 'demo-engineer' },
+  { principal: { principalId: 'demo.reliability', displayName: 'Demo Reliability Engineer', role: 'reliability_engineer', scopes: [DEMO_CONTRACT, DEMO_PORTFOLIO], party: 'owner' }, token: 'demo-reliability' },
+  { principal: { principalId: 'demo.contract', displayName: 'Demo Contract Manager', role: 'contract_manager', scopes: [DEMO_CONTRACT, DEMO_PORTFOLIO], party: 'owner' }, token: 'demo-contract' },
+  { principal: { principalId: 'demo.finance', displayName: 'Demo Finance Reviewer', role: 'finance_reviewer', scopes: [DEMO_CONTRACT, DEMO_PORTFOLIO], party: 'owner' }, token: 'demo-finance' },
+  { principal: { principalId: 'demo.approver', displayName: 'Demo Approver', role: 'approver', scopes: [DEMO_CONTRACT, DEMO_PORTFOLIO], party: 'owner' }, token: 'demo-approver' },
   { principal: { principalId: 'demo.admin', displayName: 'Demo Administrator', role: 'administrator', scopes: [SYSTEM] }, token: 'demo-admin' },
-  { principal: { principalId: 'demo.other', displayName: 'Demo Engineer (other contract)', role: 'maintenance_engineer', scopes: [{ type: 'contract', id: 'OTHER-CONTRACT' }] }, token: 'demo-other-contract' },
+  { principal: { principalId: 'demo.other', displayName: 'Demo Engineer (other contract)', role: 'maintenance_engineer', scopes: [{ type: 'contract', id: 'OTHER-CONTRACT' }], party: 'contractor' }, token: 'demo-other-contract' },
 ];
 
 export class DemoTokenDirectory implements TokenDirectory {

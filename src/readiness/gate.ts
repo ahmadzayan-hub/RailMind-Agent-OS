@@ -25,7 +25,8 @@ export type ReadinessCode =
   | 'rejected_source_record'
   | 'stale_source'
   | 'definition_not_effective'
-  | 'unmapped_source_field';
+  | 'unmapped_source_field'
+  | 'missing_completion';
 
 export interface ReadinessIssue {
   code: ReadinessCode;
@@ -61,6 +62,8 @@ export interface ReadinessInput {
 const FAILURE_TYPES = new Set(['CM', 'CORRECTIVE', 'EM']);
 const CLOSED = new Set(['COMP', 'CLOSE', 'CAN']);
 const DOWNTIME_KPIS = ['availability', 'mttr', 'mtbf'];
+const PM_TYPES = new Set(['PM']);
+const PM_KPIS = ['pm_compliance'];
 
 function validDate(value: string | undefined): boolean {
   return value !== undefined && !Number.isNaN(Date.parse(value));
@@ -113,6 +116,10 @@ export function assessReadiness(input: ReadinessInput): ReadinessAssessment {
     const isFailure = wo.workType ? FAILURE_TYPES.has(wo.workType.toUpperCase()) : Boolean(wo.failureCode);
     if (isFailure && (wo.downtimeMinutes === undefined || wo.downtimeMinutes === null) && !(wo.actualStartAt && wo.completedAt)) {
       issues.push({ code: 'missing_downtime', severity: 'block', detail: `Failure work order ${id} has neither downtime nor start and completion timestamps.`, recordId: id, kpiIds: DOWNTIME_KPIS });
+    }
+    const isPm = wo.workType ? PM_TYPES.has(wo.workType.toUpperCase()) : false;
+    if (isPm && CLOSED.has((wo.status ?? '').toUpperCase()) && wo.status.toUpperCase() !== 'CAN' && !wo.completedAt) {
+      issues.push({ code: 'missing_completion', severity: 'warn', detail: `PM work order ${id} is closed without a completion timestamp; on-time compliance cannot be confirmed.`, recordId: id, kpiIds: PM_KPIS });
     }
     if (isFailure && !CLOSED.has((wo.status ?? '').toUpperCase()) && wo.reportedAt && wo.reportedAt <= input.periodEnd && input.asOf > input.periodEnd) {
       issues.push({ code: 'open_beyond_period', severity: 'warn', detail: `Failure work order ${id} is still open after period end; repair time may change on closure.`, recordId: id, kpiIds: DOWNTIME_KPIS });
