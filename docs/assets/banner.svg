@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="400" viewBox="0 0 1280 400" role="img" aria-labelledby="t d">
+  <title id="t">RailMind Agent OS</title>
+  <desc id="d">Evidence-first, governed decision layer for rail maintenance, asset, contract and finance intelligence.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#071827"/>
+      <stop offset="1" stop-color="#0a2034"/>
+    </linearGradient>
+    <linearGradient id="rail" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#0e5ba8" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#0e5ba8"/>
+      <stop offset="1" stop-color="#16876b"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="400" fill="url(#bg)"/>
+  <g stroke="#ffffff" stroke-opacity="0.05">
+    <path d="M0 80H1280M0 160H1280M0 240H1280M0 320H1280"/>
+    <path d="M160 0V400M320 0V400M480 0V400M640 0V400M800 0V400M960 0V400M1120 0V400"/>
+  </g>
+  <g fill="none" stroke-linecap="round">
+    <path d="M760 300 C 880 300, 900 140, 1020 140 S 1180 220, 1280 200" stroke="url(#rail)" stroke-width="6"/>
+    <path d="M760 320 C 880 320, 900 160, 1020 160 S 1180 240, 1280 220" stroke="url(#rail)" stroke-width="2" stroke-opacity="0.6"/>
+  </g>
+  <g>
+    <circle cx="840" cy="292" r="10" fill="#0a2034" stroke="#e8f2fb" stroke-width="3"/>
+    <circle cx="950" cy="180" r="10" fill="#0a2034" stroke="#e8f2fb" stroke-width="3"/>
+    <circle cx="1020" cy="140" r="12" fill="#be3b47"/>
+    <circle cx="1020" cy="140" r="22" fill="none" stroke="#be3b47" stroke-opacity="0.4" stroke-width="2"/>
+    <circle cx="1130" cy="178" r="10" fill="#0a2034" stroke="#e8f2fb" stroke-width="3"/>
+    <circle cx="1220" cy="206" r="10" fill="#16876b"/>
+  </g>
+  <g transform="translate(1040 236)">
+    <rect width="170" height="76" rx="14" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.18"/>
+    <text x="16" y="28" fill="#8fb4d4" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="700" letter-spacing="1.5">EVIDENCE</text>
+    <rect x="16" y="40" width="96" height="6" rx="3" fill="#0e5ba8"/>
+    <rect x="16" y="54" width="138" height="6" rx="3" fill="#16876b"/>
+  </g>
+  <rect x="80" y="96" width="56" height="56" rx="14" fill="#0e5ba8"/>
+  <path d="M96 116h24M96 124h18M96 132h24" stroke="#ffffff" stroke-width="3.5" stroke-linecap="round"/>
+  <text x="156" y="136" fill="#e8f2fb" font-family="Arial, Helvetica, sans-serif" font-size="20" font-weight="700" letter-spacing="3">PROJECT 44</text>
+  <text x="80" y="222" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-size="64" font-weight="800">RailMind Agent OS</text>
+  <text x="80" y="270" fill="#b9cde0" font-family="Arial, Helvetica, sans-serif" font-size="24">Evidence-first, governed decisions for rail maintenance,</text>
+  <text x="80" y="302" fill="#b9cde0" font-family="Arial, Helvetica, sans-serif" font-size="24">asset, contract and finance intelligence.</text>
+  <text x="80" y="352" fill="#7fc7b4" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="700" letter-spacing="1">P0 SYNTHETIC DEMO · READ-ONLY · HUMAN APPROVAL</text>
+</svg>

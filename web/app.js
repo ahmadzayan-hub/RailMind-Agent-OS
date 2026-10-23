@@ -145,7 +145,8 @@ function renderDecisions() {
 function renderExceptionTable() {
   $('#exception-count').textContent = `${pack.exceptions.length} ${isAr() ? 'مفتوحة' : 'open'}`;
   const h = isAr() ? ['الحالة', 'الاستثناء', 'الأدلة', 'الإجراء المطلوب'] : ['Severity', 'Exception', 'Evidence', 'Decision required'];
-  $('#exception-table').innerHTML = `<div class="data-table"><div class="table-row table-head">${h.map((v) => `<span>${v}</span>`).join('')}</div>${pack.exceptions.map((x) => { const copy = exceptionCopy(x); return `<div class="table-row"><span>${status(x.severity)}</span><span><b>${copy.title}</b><small>${copy.detail}</small></span><span dir="ltr">${sourceLabel(x.evidence)}</span><span>${copy.decision}</span></div>`; }).join('')}</div>`;
+  $('#exception-table').innerHTML = `<div class="data-table"><div class="table-row table-head">${h.map((v) => `<span>${v}</span>`).join('')}</div>${pack.exceptions.map((x) => { const copy = exceptionCopy(x); return `<div class="table-row"><span>${status(x.severity)}</span><span><b>${copy.title}</b><small>${copy.detail}</small></span><span dir="ltr">${sourceLabel(x.evidence)}</span><span>${copy.decision}<button class="decision-action table-evidence" data-table-evidence="${x.kpiId}" type="button">${isAr() ? 'اعرض الأدلة' : 'Open evidence'} <i>‹</i></button></span></div>`; }).join('')}</div>`;
+  $$('[data-table-evidence]').forEach((b) => b.addEventListener('click', () => openDecision(b.dataset.tableEvidence)));
 }
 
 function renderAssets() {
@@ -702,8 +703,10 @@ function openDecision(kpiId) {
   const copy = exception ? exceptionCopy(exception) : { title: kpiName(k.id), alt: k.name, decision: tx('kpiWithin') };
   $('#drawer-id').textContent = exception ? exceptionCode(exception) : k.id.toUpperCase();
   $('#drawer-content').innerHTML = `<div class="drawer-status">${status(sev)}</div><h3>${copy.title}</h3><small class="drawer-secondary">${copy.alt}</small><section class="drawer-block"><span>${kpiName(k.id)}</span><p><b dir="ltr">${fmtValue(k.id, k.value)}${unit(k.unit)}</b> · ${tx('target')} ${targetText(k)} · ${tx('formula')} <span dir="ltr">${k.formulaVersion}</span></p><small>${tx('engineLabel')}</small></section><section class="drawer-block"><span>${tx('recommendation')}</span><p>${copy.decision} ${isAr() ? 'هذا مقترح للمراجعة فقط.' : 'This is a review-only proposal.'}</p></section><section class="drawer-evidence"><div><span>⌁</span><p><small>${tx('source')}</small><b dir="ltr">${sourceLabel(evidence)}</b></p></div><div><span>◷</span><p><small>${tx('observed')}</small><b dir="ltr">${observed}</b></p></div><div><span>✓</span><p><small>${tx('quality')}</small><b>${tx('verified')} · ${evidence.length} ${tx('evidenceCount')}</b></p></div></section>${exception ? `<p class="review-note" dir="ltr">${tx('exceptionId')}: ${exception.id}</p>` : ''}<section class="governance-callout"><span>⌑</span><p><b>${tx('governance')}</b><small>${tx('noWrite')}</small></p></section><button class="review-button" id="request-review" type="button">✓ ${tx('requestReview')}</button><p class="review-note">◷ ${tx('reviewNote')}</p>`;
+  drawerReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   $('#drawer-backdrop').hidden = false;
   document.body.classList.add('drawer-open');
+  $('#drawer-close').focus();
   $('#request-review')?.addEventListener('click', async () => {
     if (state.live.available && reportStatus() === 'draft') { await runTransition('submit_for_review'); toast(tx('submitViaDrawer')); }
     else toast(tx('reviewReady'));
@@ -711,7 +714,25 @@ function openDecision(kpiId) {
   });
 }
 
-function closeDrawer() { $('#drawer-backdrop').hidden = true; document.body.classList.remove('drawer-open'); }
+/* Keyboard users stay inside the open drawer and return to the control that opened it. */
+let drawerReturnFocus = null;
+function drawerFocusables() { return $$('#decision-drawer button, #decision-drawer [href], #decision-drawer [tabindex]:not([tabindex="-1"])').filter((el) => !el.disabled && el.offsetParent !== null); }
+function trapDrawerFocus(event) {
+  if (event.key !== 'Tab' || $('#drawer-backdrop').hidden) return;
+  const items = drawerFocusables();
+  if (!items.length) return;
+  const first = items[0];
+  const last = items[items.length - 1];
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+}
+function closeDrawer() {
+  if ($('#drawer-backdrop').hidden) return;
+  $('#drawer-backdrop').hidden = true;
+  document.body.classList.remove('drawer-open');
+  if (drawerReturnFocus && document.contains(drawerReturnFocus)) drawerReturnFocus.focus();
+  drawerReturnFocus = null;
+}
 function toast(message) { const box = $('#toast'); box.textContent = message; box.classList.add('show'); clearTimeout(toast.timer); toast.timer = setTimeout(() => box.classList.remove('show'), 2700); }
 
 /* ---------- Language ---------- */
@@ -755,6 +776,7 @@ function setup() {
   $('#open-brief-button').addEventListener('click', () => openDecision(topException?.kpiId ?? 'availability'));
   $('#evidence-button').addEventListener('click', () => openDecision('availability'));
   $('#drawer-close').addEventListener('click', closeDrawer);
+  document.addEventListener('keydown', trapDrawerFocus);
   $('#drawer-backdrop').addEventListener('click', (e) => { if (e.target === $('#drawer-backdrop')) closeDrawer(); });
   $('#search-trigger').addEventListener('click', () => { switchView('agents'); setTimeout(() => $('#agent-input').focus(), 260); });
   document.addEventListener('keydown', (e) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); switchView('agents'); setTimeout(() => $('#agent-input').focus(), 260); } if (e.key === 'Escape') closeDrawer(); });
