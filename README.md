@@ -4,6 +4,8 @@
 
 An evidence-first, governed decision layer for rail maintenance, asset, contract and finance intelligence.
 
+<p align="center"><img src="docs/assets/hero.jpg" alt="Concept illustration. Not a product screenshot and not a real operations room." width="100%"><br><sub><em>Concept illustration. Not a product screenshot and not a real operations room.</em></sub></p>
+
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)
 ![Node.js](https://img.shields.io/badge/Node.js-22-339933?logo=node.js&logoColor=white)
 ![Web](https://img.shields.io/badge/Web-plain%20ES%20modules-F7DF1E?logo=javascript&logoColor=black)
