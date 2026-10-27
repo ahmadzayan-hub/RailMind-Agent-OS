@@ -1,14 +1,29 @@
-# Project 44 — RailMind Agent OS
+<p align="center"><img src="docs/assets/banner.svg" alt="RailMind Agent OS: evidence-first, governed decisions for rail maintenance, asset, contract and finance intelligence" width="100%"></p>
 
-Canonical implementation repository for an open-source, evidence-first rail asset and contract intelligence platform.
+# RailMind Agent OS (Project 44)
+
+An evidence-first, governed decision layer for rail maintenance, asset, contract and finance intelligence.
+
+<p align="center"><img src="docs/assets/hero.jpg" alt="Concept illustration. Not a product screenshot and not a real operations room." width="100%"><br><sub><em>Concept illustration. Not a product screenshot and not a real operations room.</em></sub></p>
+
+![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)
+![Node.js](https://img.shields.io/badge/Node.js-22-339933?logo=node.js&logoColor=white)
+![Web](https://img.shields.io/badge/Web-plain%20ES%20modules-F7DF1E?logo=javascript&logoColor=black)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-optional-4169E1?logo=postgresql&logoColor=white)
+![Tests](https://img.shields.io/badge/tests-node%3Atest-5FA04E)
+![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
 > Replace document-driven periodic reporting with a governed, continuously updated decision environment while keeping Maximo, finance and approved contract repositories authoritative.
 
-## What Project 44 owns
+> **Stage: P0 synthetic demo.** Nothing here is connected to live operational, Maximo or finance data. Every number in the preview comes from synthetic records. Demo KPI formulas and thresholds are examples, not contractual definitions.
+
+## Overview
+
+RailMind Agent OS answers one question for the asset owner and the maintenance contractor: what is happening across asset, maintenance, contract and financial performance, what needs attention, why, and what decision is required now.
 
 Project 44 is the **Agent Operating System and decision layer**. It connects asset, maintenance, finance and approved contractual context; calculates deterministic KPIs; detects exceptions; coordinates bounded agents; drafts grounded reports; and enforces human approval.
 
-The existing `RailMind` repository is treated as the asset-intelligence reference/legacy prototype until its reusable components are migrated.
+This repository is the canonical platform. The older [`RailMind`](https://github.com/ahmadzayan-hub/RailMind) repository is a legacy asset-intelligence prototype and migration source only (see `docs/MIGRATION_FROM_RAILMIND.md`).
 
 ## Non-negotiable rules
 
@@ -21,7 +36,7 @@ The existing `RailMind` repository is treated as the asset-intelligence referenc
 7. Model and agent-framework independence through internal ports.
 8. Open-source-first, zero-cost-capable local development.
 
-## P0 implemented
+## Key features (P0 implemented)
 
 - canonical decision data model
 - configurable Maximo REST read adapter and mock port
@@ -59,16 +74,63 @@ The existing `RailMind` repository is treated as the asset-intelligence referenc
 
 > **Important:** KPI formulas and thresholds included in the demo are synthetic examples only. They are not RTA contractual definitions and must be replaced by formally approved rules before production. The portfolio forecast is exploratory decision support, not a committed budget, cash forecast or contractual entitlement.
 
-## Run
+## Screenshots
+
+Captured from the local server (`npm run serve`) with the synthetic demo data. The interface is Arabic first with an English toggle.
+
+| Desktop (1440 x 900) | Mobile (390 x 844) |
+|---|---|
+| <img src="docs/assets/screenshots/desktop.png" alt="Control Tower on desktop, Arabic layout" width="100%"> | <img src="docs/assets/screenshots/mobile.png" alt="Control Tower on mobile, Arabic layout" width="260"> |
+
+Exception centre drill-down: every exception row opens its evidence drawer, with keyboard focus kept inside the drawer and returned on close.
+
+<img src="docs/assets/screenshots/desktop-exceptions-drawer.png" alt="Decision pack drawer opened from the exception centre" width="100%">
+
+## Quick start
+
+Requirements: Node.js 22.18 or later (the server runs TypeScript through Node type stripping).
 
 ```bash
-npm run verify
-npm run serve
+npm ci
+npm run verify   # typecheck, web checks, data drift, portfolio check, tests, build and package smoke
+npm run serve    # http://localhost:4173
 ```
 
-Open `http://localhost:4173`.
+The browser preview is **illustrative only**. It is built from synthetic data and never sends an external write, creates a work order or changes a source system. To try the approval gate and agent runs, sign in from the preview with one of the public demo identities (see Authentication and roles).
 
-The browser preview remains **illustrative only**. It is built from synthetic data and never sends an external write, creates a work order or changes a source system.
+## Scripts
+
+| Script | Purpose |
+|---|---|
+| `npm run verify` | Full gate: typecheck, web syntax, web data drift, portfolio check, tests, build and package smoke |
+| `npm test` | `node:test` suites (109 tests; the live PostgreSQL test is skipped unless `DATABASE_URL` is set) |
+| `npm run typecheck` | Strict TypeScript check |
+| `npm run build` | Emit `dist/` (ESM and declarations) |
+| `npm run build:web-data` | Regenerate `web/data/demo-pack.js` from the engine |
+| `npm run check:web-data` | Fail when the committed data pack drifts from the engine |
+| `npm run check:portfolio` | Fail when restricted identifiers appear in the portfolio workspace |
+| `npm run serve` / `npm start` | Start the static preview and local decision API |
+
+## Project structure
+
+```text
+src/
+  agent-os/          contracts, policy, catalog, kernel, orchestrator, tools, memory
+  agents/            capability handlers (data quality, KPI, exceptions, reporting, asset intelligence)
+  asset-intelligence/ engine migrated from the legacy RailMind prototype
+  kpi/ exceptions/ readiness/ reporting/ forecast/   deterministic decision logic
+  providers/ connectors/   provenance-carrying providers; read-only Maximo, contract, condition ports
+  api/ auth/ audit/ ledger/ persistence/ http/       API, roles, hash-chained audit, ledger, PostgreSQL, static host rules
+  web/demo-pack.ts   projects engine outputs into web/data/demo-pack.js
+web/                 bilingual Control Tower (plain ES modules, no bundler, no runtime dependency)
+index.html           application shell
+server.mjs           static host and API, structured logs, graceful shutdown
+infra/               docker-compose (PostgreSQL + pgvector) and SQL schema
+tests/               node:test suites
+docs/                product authority, architecture, data contract, pilot plan, status, deployment
+```
+
+## Using the server
 
 ### How the preview gets its numbers
 
@@ -144,30 +206,62 @@ DATABASE_URL=postgres://railmind:local_only_change_me@localhost:5432/railmind np
 DATABASE_URL=... npm test   # also runs the live PostgreSQL integration test
 ```
 
-## Replit
-
-The repository includes `.replit` and `replit.nix` configuration files for a Node.js 22 Replit environment. Import `ahmadzayan-hub/44` from GitHub, then select **Run**. Replit installs dependencies with `npm ci` and starts the application using `PORT=5000 npm run serve`, which aligns with Replit's web preview port. The deployment configuration runs `npm ci && npm run verify` before starting the server with `PORT=5000 npm start`.
-
 ## Architecture
 
-```text
-Maximo / Finance / Contracts / Condition feeds
-                  │
-          Evidence & Provenance
-                  │
-       Deterministic KPI Engine
-                  │
-     Exception & Decision Layer
-                  │
-        RailMind Agent OS Kernel
-       ┌──────────┼───────────┐
- Asset Agent   Reporting   Contract/Finance Agents
-       └──────────┼───────────┘
-                  │
-          Human Approval Gates
-                  │
- Control Tower / Exception Centre / Reports
+```mermaid
+flowchart TD
+  S[Maximo / Finance / Contracts / Condition feeds] --> E[Evidence and provenance]
+  E --> R[Readiness gate: READY / PROVISIONAL / BLOCKED]
+  R --> K[Deterministic KPI engine]
+  K --> X[Exception and decision layer]
+  X --> O[RailMind Agent OS kernel]
+  O --> A1[Asset agent]
+  O --> A2[Reporting agents]
+  O --> A3[Contract / finance agents]
+  A1 --> H[Human approval gates]
+  A2 --> H
+  A3 --> H
+  H --> UI[Control Tower / Exception centre / Reports]
+  O -. audit .-> L[(Append-only ledger and hash-chained audit)]
 ```
+
+The browser never computes a KPI, exception or risk score. It renders the Control Tower DTO from the API, or the static pack generated by the same application service when the API is not available.
+
+## Deploy
+
+### Replit (configured)
+
+The repository includes `.replit` and `replit.nix` for a Node.js 22 Replit environment. Import `ahmadzayan-hub/RailMind-Agent-OS` from GitHub, then select **Run**. Replit installs dependencies with `npm ci` and starts the application with `PORT=5000 npm run serve`, which matches the Replit web preview port. The deployment configuration runs `npm ci && npm run verify` before starting the server with `PORT=5000 npm start`.
+
+### Docker
+
+See Containers above.
+
+### Vercel (unverified)
+
+`vercel.json` declares `server.mjs` as a function with `index.html` and `web/**` included. This path has not been verified end to end: the server imports `src/**` and needs Node 22.18 or later for type stripping (see `docs/RECONCILIATION_2026-09-09.md`). If you try it, use these settings:
+
+| Setting | Value |
+|---|---|
+| Framework preset | Other |
+| Root directory | `./` (repository root) |
+| Build command | none (no build step is required to serve) |
+| Node.js version | 22.x |
+| Environment variables | none required; all variables in `.env.example` are optional and the server falls back to the synthetic in-memory demo |
+
+Do not deploy the repository root as a plain static site. That would expose `src/`, `docs/` and package files, which the server allowlist in `src/http/public-paths.ts` deliberately blocks.
+
+## Status and known limitations
+
+- P0 synthetic demo. Not connected to live operational, Maximo or finance systems, and must not be presented as operational.
+- Authentication is a hashed-token directory, not enterprise SSO. `DATA_CLASSIFICATION` is a deployment setting, not per-record classification.
+- Production mode cannot start yet: contract-repository and condition-monitoring adapters do not exist (fail closed by design).
+- Two catalog capabilities have no handler yet: contract-context and finance-context.
+- Asset-intelligence weights and thresholds are legacy demo values and uncalibrated.
+- Run records live in process memory (`/api/runs`); only audit events and decision memory are persisted.
+- The runtime is single-step: one handler per run, no model planning, no retries, no scheduling.
+- KPI values in the preview come from the generated pack; report status, readiness and audit are live from the API.
+- GIS positions, station names and routing defaults in `web/app.js` are presentation placeholders, labelled as such in the code.
 
 ## Documentation
 
@@ -187,3 +281,24 @@ Maximo / Finance / Contracts / Condition feeds
 - `docs/openapi.yaml`
 - `docs/UX_REVIEW_2026-09-09.md`
 - `docs/CI_WORKFLOW_TEMPLATE.yml`
+- `docs/REPLIT_DEPLOYMENT.md`
+
+## Arabic summary
+
+<div dir="rtl" lang="ar">
+
+**RailMind Agent OS** هو المستودع المعتمد لطبقة قرار محكومة تقوم على الأدلة، وتخدم ذكاء صيانة السكك الحديدية والأصول والعقود والشؤون المالية.
+
+- يحسب مؤشرات الأداء بمحرك حتمي ذي إصدارات مختبرة، ولا تحسب النماذج اللغوية أي قيمة تعاقدية.
+- يرفق كل مخرج قراري بمراجع أدلة توضح نظام المصدر ونوع الكيان ومعرّفه ووقت الرصد.
+- تتطلب المخرجات التعاقدية والمالية والمتعلقة بالسلامة اعتمادًا بشريًا باسم صريح.
+- تبقى أنظمة Maximo والأنظمة المالية هي المرجع المعتمد، والتكاملات في المرحلة الحالية للقراءة فقط.
+- واجهة برج التحكم عربية أولًا مع خيار الإنجليزية.
+
+المرحلة الحالية عرض تجريبي ببيانات اصطناعية فقط، وهو غير متصل بأي نظام تشغيلي حي، ولا يجوز تقديمه على أنه نظام تشغيلي.
+
+</div>
+
+## License and ownership
+
+Licensed under the Apache License 2.0 (see `LICENSE`). Owned and maintained by Ahmed Zaian. Security reporting: see `SECURITY.md`.

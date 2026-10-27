@@ -70,3 +70,5 @@ html[dir=ltr] .gis-panel--layers{border-inline-end:1px solid #dbe8ef}html[dir=lt
 .predictive-empty{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;padding:12px 14px;border:1px dashed var(--line);border-radius:12px;color:var(--muted);font-size:11px}.predictive-empty p{margin:0}
 .metric-readiness{display:inline-block;margin-top:6px;padding:2px 7px;border-radius:999px;font-size:9px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}.metric-readiness--READY{color:var(--green);background:var(--green-pale)}.metric-readiness--PROVISIONAL{color:var(--amber);background:var(--amber-pale)}.metric-readiness--BLOCKED{color:var(--red);background:var(--red-pale)}
 .approval-record b.ok{color:var(--green)}.approval-record b.warn{color:var(--amber)}.approval-record.warn{color:var(--red)}
+/* Exception centre rows drill down to the same evidence drawer as the decision queue. */
+.table-evidence{margin-top:10px;width:auto}
