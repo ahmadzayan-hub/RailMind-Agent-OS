@@ -1,26 +1,39 @@
 import { AGENT_CATALOG } from '../agent-os/catalog.ts';
 import type { ModelGateway } from '../agent-os/contracts.ts';
 import { InMemoryMemoryStore, type MemoryStore } from '../agent-os/memory.ts';
+import { InMemoryRunStore, type RunStore } from '../agent-os/run-store.ts';
 import { AgentRuntime } from '../agent-os/orchestrator.ts';
 import { buildStandardTools } from '../agent-os/standard-tools.ts';
 import { createStandardHandlers } from '../agents/index.ts';
 import { InMemoryAuditLog, type AuditLog } from '../audit/log.ts';
 import { InMemoryDecisionLedger, type DecisionLedger } from '../ledger/contracts.ts';
 import { createTokenDirectory } from '../auth/token-directory.ts';
-import { InMemoryConditionReadPort } from '../connectors/condition/port.ts';
-import { InMemoryContractReadPort } from '../connectors/contract/port.ts';
+import { ConditionMonitoringRestClient } from '../connectors/condition/client.ts';
+import { InMemoryConditionReadPort, type ConditionReadPort } from '../connectors/condition/port.ts';
+import { InMemoryContractReadPort, type ContractReadPort } from '../connectors/contract/port.ts';
+import { createDocumentContractReadPort } from '../connectors/contract/repository.ts';
 import { MaximoRestClient } from '../connectors/maximo/client.ts';
 import { MockMaximoReadPort } from '../connectors/maximo/mock.ts';
 import type { MaximoReadPort } from '../connectors/maximo/port.ts';
 import type { AppConfig } from '../config.ts';
-import { DEMO_ASSETS, DEMO_CONDITION_PROFILES, DEMO_CONTRACT_KPI_SET, DEMO_PM_RECORDS, DEMO_REPORT, DEMO_SCOPE, DEMO_WORK_ORDERS } from '../demo.ts';
+import { DEMO_DATASET, DEMO_REPORT, DEMO_REPORT_REGISTRATIONS, DEMO_SCOPE } from '../demo.ts';
 import { OpenAiCompatibleGateway } from '../llm/openai-compatible.ts';
 import type { SqlDatabase } from '../persistence/sql.ts';
 import { InMemoryReportStore, type ReportStore } from '../reporting/store.ts';
+import { createReportRegistry } from '../reporting/registry.ts';
+import { InMemoryReviewStore, type ReviewStore } from '../review/store.ts';
+import { InMemoryKnowledgeStore, type KnowledgeStore } from '../knowledge/contracts.ts';
+import { DEMO_KNOWLEDGE_DOCUMENTS } from '../knowledge/demo-documents.ts';
+import { InMemoryGisReadPort, type GisReadPort } from '../gis/contracts.ts';
+import { DEMO_SCHEMATIC } from '../gis/demo-schematic.ts';
 import type { ApiDependencies } from '../api/router.ts';
-import { ControlTowerService } from './control-tower-service.ts';
+import { ControlTowerService, type TowerScope } from './control-tower-service.ts';
+import type { ReportPackage } from '../reporting/contracts.ts';
+import { PortfolioService } from '../portfolio/service.ts';
+import { createSyntheticPortfolioProvider } from '../portfolio/synthetic.ts';
 import { assertConsistentMode, type DataProviders } from '../providers/contracts.ts';
-import { createContractRepositoryProvider, createMaximoReadProvider } from '../providers/production.ts';
+import { createConditionMonitoringProvider, createContractRepositoryProvider, createMaximoReadProvider, type ConditionMonitoringSource } from '../providers/production.ts';
+import { buildReportPackage } from '../reporting/generator.ts';
 import { createSyntheticProviders } from '../providers/synthetic.ts';
 
 /**
@@ -40,8 +53,24 @@ export interface ComposeOverrides {
   /** Supplied by the host when DATABASE_URL is set (keeps `pg` out of the domain layer). */
   database?: SqlDatabase;
   maximo?: MaximoReadPort;
+  /** Parsed JSON of the contract repository export; the host reads CONTRACT_REPOSITORY_PATH. */
+  contractDocument?: unknown;
+  contract?: ContractReadPort;
+  condition?: ConditionReadPort & ConditionMonitoringSource;
   modelGateway?: ModelGateway | null;
   now?: () => string;
+}
+
+/** Everything production mode needs before it starts; every gap is named in one error. */
+function productionGaps(config: AppConfig, overrides: ComposeOverrides): readonly string[] {
+  const missing: string[] = [];
+  if (!config.usersJson) missing.push('RAILMIND_USERS (demo tokens are refused in production)');
+  if (!config.databaseUrl && !overrides.database) missing.push('DATABASE_URL (in-memory audit and ledger are refused in production)');
+  if (!config.maximo.baseUrl && !overrides.maximo) missing.push('MAXIMO_BASE_URL (Maximo read adapter)');
+  if (overrides.contractDocument === undefined && !overrides.contract) missing.push('CONTRACT_REPOSITORY_PATH (approved contract repository export)');
+  if (!config.condition.baseUrl && !overrides.condition) missing.push('CONDITION_BASE_URL (condition-monitoring read adapter)');
+  if (!config.scope) missing.push('RAILMIND_CONTRACT_ID, RAILMIND_PERIOD_START and RAILMIND_PERIOD_END (reporting scope)');
+  return missing;
 }
 
 export async function composeApplication(config: AppConfig, overrides: ComposeOverrides = {}): Promise<Application> {
@@ -49,16 +78,22 @@ export async function composeApplication(config: AppConfig, overrides: ComposeOv
   let memoryStore: MemoryStore;
   let reportStore: ReportStore;
   let ledger: DecisionLedger;
+  let runStore: RunStore;
+  let reviewStore: ReviewStore;
+  let knowledge: KnowledgeStore | undefined;
   let persistence: ApiDependencies['persistence'] = 'in-memory';
   let close: () => Promise<void> = async () => {};
 
   if (overrides.database) {
-    const { PgAuditLog, PgDecisionLedger, PgMemoryStore, PgReportStore, ensureSchema } = await import('../persistence/postgres.ts');
+    const { PgAuditLog, PgDecisionLedger, PgKnowledgeStore, PgMemoryStore, PgReportStore, PgReviewStore, PgRunStore, ensureSchema } = await import('../persistence/postgres.ts');
     await ensureSchema(overrides.database);
     auditLog = new PgAuditLog(overrides.database);
     memoryStore = new PgMemoryStore(overrides.database);
     reportStore = new PgReportStore(overrides.database);
     ledger = new PgDecisionLedger(overrides.database);
+    runStore = new PgRunStore(overrides.database);
+    reviewStore = new PgReviewStore(overrides.database);
+    knowledge = new PgKnowledgeStore(overrides.database);
     persistence = 'postgres';
     const db = overrides.database;
     close = () => db.close();
@@ -67,6 +102,10 @@ export async function composeApplication(config: AppConfig, overrides: ComposeOv
     memoryStore = new InMemoryMemoryStore();
     reportStore = new InMemoryReportStore();
     ledger = new InMemoryDecisionLedger();
+    runStore = new InMemoryRunStore();
+    reviewStore = new InMemoryReviewStore();
+    /* Synthetic mode carries the demo corpus in memory; production without a database has no knowledge store and knowledge.read is absent (fail closed). */
+    knowledge = config.mode === 'production' ? undefined : new InMemoryKnowledgeStore(DEMO_KNOWLEDGE_DOCUMENTS);
   }
 
   /*
@@ -76,21 +115,39 @@ export async function composeApplication(config: AppConfig, overrides: ComposeOv
    */
   let providers: DataProviders;
   let maximo: MaximoReadPort;
-  let contract;
-  let condition;
+  let contract: ContractReadPort;
+  let condition: ConditionReadPort;
+  let scope: TowerScope;
+  let seedReport: ReportPackage;
   if (config.mode === 'production') {
-    const missing: string[] = [];
-    if (!config.maximo.baseUrl && !overrides.maximo) missing.push('MAXIMO_BASE_URL (Maximo read adapter)');
-    missing.push('contract repository adapter (not implemented; only the in-memory demo set exists)');
-    missing.push('condition-monitoring adapter (not implemented; only synthetic profiles exist)');
-    throw new Error(`RAILMIND_MODE=production cannot start: ${missing.join('; ')}. Synthetic fallback is refused in production.`);
+    const missing = productionGaps(config, overrides);
+    if (missing.length > 0) throw new Error(`RAILMIND_MODE=production cannot start: ${missing.join('; ')}. Synthetic fallback is refused in production.`);
+    maximo = overrides.maximo ?? new MaximoRestClient({ baseUrl: config.maximo.baseUrl as string, apiKey: config.maximo.apiKey, objectStructures: config.maximo.objectStructures });
+    const contractPort = overrides.contract ?? createDocumentContractReadPort(overrides.contractDocument);
+    if (!overrides.contract) {
+      const unapproved = (contractPort as ReturnType<typeof createDocumentContractReadPort>).sets.filter((set) => set.approvalStatus !== 'approved');
+      if (unapproved.length > 0) throw new Error(`RAILMIND_MODE=production cannot start: contract repository sets ${unapproved.map((set) => `${set.contractId}/${set.definitionVersion} (${set.approvalStatus})`).join(', ')} are not approved.`);
+      const unapprovedTwins = (contractPort as ReturnType<typeof createDocumentContractReadPort>).twins.filter((twin) => twin.approvalStatus !== 'approved');
+      if (unapprovedTwins.length > 0) throw new Error(`RAILMIND_MODE=production cannot start: contract twins ${unapprovedTwins.map((twin) => `${twin.contractId}/${twin.twinVersion} (${twin.approvalStatus})`).join(', ')} are not approved.`);
+    }
+    contract = contractPort;
+    const conditionClient = overrides.condition ?? new ConditionMonitoringRestClient({ baseUrl: config.condition.baseUrl as string, apiKey: config.condition.apiKey });
+    condition = conditionClient;
+    const maintenance = createMaximoReadProvider(maximo, { now: overrides.now });
+    providers = { mode: 'production', maintenance, finance: maintenance, contract: createContractRepositoryProvider(contract, { now: overrides.now }), condition: createConditionMonitoringProvider(conditionClient, { now: overrides.now }) };
+    const configured = config.scope as NonNullable<AppConfig['scope']>;
+    scope = { contractId: configured.contractId, periodStart: configured.periodStart, periodEnd: configured.periodEnd };
+    /* The seed package is built through the same governed pipeline; the API refreshes its KPIs on every read. */
+    seedReport = buildReportPackage({ reportId: `${scope.contractId}-MONTHLY-${scope.periodEnd.slice(0, 7)}`, cadence: 'monthly', contractId: scope.contractId, periodStart: scope.periodStart, periodEnd: scope.periodEnd, kpis: [] });
+  } else {
+    maximo = overrides.maximo ?? new MockMaximoReadPort({ assets: DEMO_DATASET.assets, workOrders: DEMO_DATASET.workOrders, preventiveMaintenance: DEMO_DATASET.preventiveMaintenance, invoices: DEMO_DATASET.invoices });
+    contract = new InMemoryContractReadPort(DEMO_DATASET.kpiSets, DEMO_DATASET.twins);
+    condition = new InMemoryConditionReadPort(DEMO_DATASET.conditionProfiles);
+    providers = createSyntheticProviders(DEMO_DATASET);
+    scope = config.scope ? { ...config.scope, priorBreachesByKpi: DEMO_SCOPE.priorBreachesByKpi } : DEMO_SCOPE;
+    seedReport = DEMO_REPORT;
   }
-  maximo = overrides.maximo ?? new MockMaximoReadPort({ assets: DEMO_ASSETS, workOrders: DEMO_WORK_ORDERS, preventiveMaintenance: DEMO_PM_RECORDS });
-  contract = new InMemoryContractReadPort([DEMO_CONTRACT_KPI_SET]);
-  condition = new InMemoryConditionReadPort(DEMO_CONDITION_PROFILES);
-  providers = createSyntheticProviders({ assets: DEMO_ASSETS, workOrders: DEMO_WORK_ORDERS, preventiveMaintenance: DEMO_PM_RECORDS, conditionProfiles: DEMO_CONDITION_PROFILES, kpiSets: [DEMO_CONTRACT_KPI_SET] });
   assertConsistentMode(providers);
-  void createMaximoReadProvider; void createContractRepositoryProvider; void MaximoRestClient;
 
   const modelGateway: ModelGateway | null = overrides.modelGateway !== undefined
     ? overrides.modelGateway
@@ -98,20 +155,28 @@ export async function composeApplication(config: AppConfig, overrides: ComposeOv
 
   const runtime = new AgentRuntime({
     catalog: AGENT_CATALOG,
-    tools: buildStandardTools({ maximo, contract, condition, memory: memoryStore }),
-    handlers: createStandardHandlers(DEMO_SCOPE),
+    tools: buildStandardTools({ maximo, contract, condition, memory: memoryStore, knowledge, classification: config.classification }),
+    handlers: createStandardHandlers(scope),
     auditLog,
     memoryStore,
     modelGateway,
     modelPolicy: { baseUrl: config.llm.baseUrl, remoteApprovedForInternal: config.llm.remoteApprovedForInternal, remoteApprovedForConfidential: config.llm.remoteApprovedForConfidential },
     ledger,
+    runStore,
     now: overrides.now,
   });
 
-  const controlTower = new ControlTowerService(providers, reportStore, DEMO_REPORT, overrides.now);
+  const controlTower = new ControlTowerService(providers, reportStore, seedReport, overrides.now);
+  if (config.mode === 'production') seedReport = await controlTower.seedPackage(scope);
+  /* Registered packages: the configured scope only in production; the demo serves two contracts and two cadences. */
+  const reports = config.mode === 'production' ? createReportRegistry([{ seed: seedReport }]) : createReportRegistry(DEMO_REPORT_REGISTRATIONS);
+  /* GIS: the synthetic schematic serves the demo only. Production has no schematic adapter yet and /api/gis fails closed (503). */
+  const gis: GisReadPort | undefined = config.mode === 'production' ? undefined : new InMemoryGisReadPort([DEMO_SCHEMATIC]);
+  /* Portfolio: synthetic provider in demo mode; a private provider would be injected here for internal builds and is refused in public builds by classification. */
+  const portfolio = new PortfolioService(createSyntheticPortfolioProvider(), { now: overrides.now, publicBuild: config.mode === 'demo' });
 
   return {
-    api: { reportStore, auditLog, memoryStore, seedReport: DEMO_REPORT, persistence, runtime, classification: config.classification, now: overrides.now, tokenDirectory: createTokenDirectory(config.usersJson), healthCheck: overrides.database ? async () => { await overrides.database?.query('SELECT 1'); } : undefined, controlTower, scope: DEMO_SCOPE, mode: providers.mode, ledger },
+    api: { reportStore, auditLog, memoryStore, seedReport, persistence, runtime, classification: config.classification, now: overrides.now, tokenDirectory: createTokenDirectory(config.usersJson), healthCheck: overrides.database ? async () => { await overrides.database?.query('SELECT 1'); } : undefined, controlTower, scope, mode: providers.mode, ledger, portfolio, reports, gis, contract, reviewStore, knowledge },
     runtime,
     providers,
     controlTower,

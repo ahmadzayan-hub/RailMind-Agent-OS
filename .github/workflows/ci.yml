@@ -10,9 +10,7 @@ permissions:
 
 jobs:
   verify:
-    strategy:
-      matrix:
-        node-version: ['Node 22']
+    name: verify (Node 22)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

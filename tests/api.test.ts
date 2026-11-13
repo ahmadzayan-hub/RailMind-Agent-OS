@@ -223,9 +223,298 @@ test('API executes a governed agent run through the composition root and audits 
     assert.equal(reliabilityRunsReport.status, 403, 'reliability engineer cannot draft contractual reports');
     const blocked = await fetch(`${base}/api/agent/run`, { method: 'POST', headers: auth, body: JSON.stringify({ capability: 'asset-health', goal: 'x', riskClass: 'operational', actionMode: 'control' }) });
     assert.equal(blocked.status, 403);
-    const runs = await (await fetch(`${base}/api/runs`, { headers: auth })).json() as { runs: unknown[] };
+    const runs = await (await fetch(`${base}/api/runs`, { headers: auth })).json() as { runs: { runId: string }[]; persistence: string };
     assert.equal(runs.runs.length, 2);
+    assert.equal(runs.persistence, 'in-memory');
+    assert.equal((await app.runtime.record(runs.runs[0]!.runId))?.runId, runs.runs[0]!.runId);
     const audit = await (await fetch(`${base}/api/audit`, { headers: auth })).json() as { chain: { valid: boolean } };
     assert.equal(audit.chain.valid, true);
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await app.close(); }
+});
+
+test('API serves the synthetic portfolio DTO to scoped principals only', async () => {
+  const { composeApplication } = await import('../src/app/compose.ts');
+  const { loadConfig } = await import('../src/config.ts');
+  const app = await composeApplication(loadConfig({}), { now: () => '2026-09-09T12:00:00Z' });
+  const handler = createApiHandler(app.api);
+  const server = createServer(async (req, res) => { if (await handler(req, res)) return; res.writeHead(404); res.end(); });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const ok = await fetch(`${base}/api/portfolio`, { headers: { Authorization: 'Bearer demo-finance' } });
+    assert.equal(ok.status, 200);
+    const dto = await ok.json() as { classification: string; cells: unknown[]; forecastMeta: { confidence: string } };
+    assert.equal(dto.classification, 'PUBLIC_SYNTHETIC');
+    assert.ok(dto.cells.length > 0);
+    const outOfScope = await fetch(`${base}/api/portfolio`, { headers: { Authorization: 'Bearer demo-other-contract' } });
+    assert.equal(outOfScope.status, 403);
+    const anonymous = await fetch(`${base}/api/portfolio`);
+    assert.equal(anonymous.status, 401);
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await app.close(); }
+});
+
+test('API runs a declared sequence with per-task permission checks and rejects malformed lists', async () => {
+  const { composeApplication } = await import('../src/app/compose.ts');
+  const { loadConfig } = await import('../src/config.ts');
+  const app = await composeApplication(loadConfig({}), { now: () => '2026-09-09T12:00:00Z' });
+  const handler = createApiHandler(app.api);
+  const server = createServer(async (req, res) => { if (await handler(req, res)) return; res.writeHead(404); res.end(); });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const post = async (token: string, body: unknown) => { const response = await fetch(`${base}/api/agent/sequence`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(body) }); return { status: response.status, json: await response.json() as Record<string, any> }; };
+  try {
+    const steps = [
+      { capability: 'data-quality', goal: 'quality', riskClass: 'operational', actionMode: 'analyse' },
+      { capability: 'maintenance-kpi', goal: 'KPIs', riskClass: 'operational', actionMode: 'analyse' },
+      { capability: 'exception-analysis', goal: 'exceptions', riskClass: 'operational', actionMode: 'analyse' },
+    ];
+    const ok = await post('demo-engineer', { tasks: steps });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.json.status, 'completed');
+    assert.equal(ok.json.runs.length, 3);
+    assert.ok(ok.json.runs.every((r: { sequenceId: string; task: { actorId: string } }) => r.sequenceId === ok.json.sequenceId && r.task.actorId === 'demo.engineer'));
+
+    const viewer = await post('demo-viewer', { tasks: steps });
+    assert.equal(viewer.status, 403);
+    const outOfScope = await post('demo-other-contract', { tasks: steps });
+    assert.equal(outOfScope.status, 403);
+    const mixed = await post('demo-reliability', { tasks: [steps[0], { capability: 'monthly-report', goal: 'x', riskClass: 'contractual', actionMode: 'draft' }] });
+    assert.equal(mixed.status, 403, 'every task in the list is permission-checked before any run starts');
+    const runs = await (await fetch(`${base}/api/runs`, { headers: { Authorization: 'Bearer demo-engineer' } })).json() as { runs: unknown[] };
+    assert.equal(runs.runs.length, 3, 'a refused sequence never starts a run');
+
+    assert.equal((await post('demo-engineer', { tasks: [] })).status, 400);
+    assert.equal((await post('demo-engineer', { tasks: 'maintenance-kpi' })).status, 400);
+    assert.equal((await post('demo-engineer', { tasks: [1] })).status, 400);
+    assert.equal((await post('demo-engineer', { tasks: Array.from({ length: 9 }, () => steps[0]) })).status, 400);
+
+    const stopped = await post('demo-engineer', { tasks: [steps[0], { capability: 'asset-health', goal: 'x', riskClass: 'operational', actionMode: 'control' }] });
+    assert.equal(stopped.status, 422);
+    assert.equal(stopped.json.status, 'stopped');
+    assert.equal(stopped.json.stoppedAt, 1);
+    const audit = await (await fetch(`${base}/api/audit`, { headers: { Authorization: 'Bearer demo-engineer' } })).json() as { chain: { valid: boolean }; events: { action: string }[] };
+    assert.equal(audit.chain.valid, true);
+    assert.ok(audit.events.some((e) => e.action === 'agent.sequence_stopped'));
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await app.close(); }
+});
+
+test('API scopes every report package to its contract: listing, reads, transitions, Control Tower and reset by report id', async () => {
+  const { composeApplication } = await import('../src/app/compose.ts');
+  const { loadConfig } = await import('../src/config.ts');
+  const app = await composeApplication(loadConfig({}), { now: () => '2026-09-09T12:00:00Z' });
+  const handler = createApiHandler(app.api);
+  const server = createServer(async (req, res) => { if (await handler(req, res)) return; res.writeHead(404); res.end(); });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const call = async (method: string, path: string, body: unknown, token: string) => { const response = await fetch(`${base}${path}`, { method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: body === undefined ? undefined : JSON.stringify(body) }); return { status: response.status, json: await response.json() as Record<string, any> }; };
+  try {
+    const admin = await call('GET', '/api/reports', undefined, 'demo-admin');
+    assert.equal(admin.status, 200);
+    assert.deepEqual(admin.json.reports.map((r: { reportId: string; isDefault: boolean }) => [r.reportId, r.isDefault]), [['DEMO-2026-08', true], ['DEMO-2026-Q3', false], ['OTHER-2026-08', false]]);
+    assert.deepEqual(admin.json.contractIds, ['DEMO-CONTRACT', 'OTHER-CONTRACT']);
+    const engineer = await call('GET', '/api/reports', undefined, 'demo-engineer');
+    assert.deepEqual(engineer.json.reports.map((r: { reportId: string }) => r.reportId), ['DEMO-2026-08', 'DEMO-2026-Q3']);
+    const other = await call('GET', '/api/reports', undefined, 'demo-other-contract');
+    assert.deepEqual(other.json.reports.map((r: { reportId: string; status: string }) => [r.reportId, r.status]), [['OTHER-2026-08', 'draft']]);
+
+    // Reads: an explicit report id is scope-checked against its own contract, not the deployment default.
+    const ownRead = await call('GET', '/api/report?reportId=OTHER-2026-08', undefined, 'demo-other-contract');
+    assert.equal(ownRead.status, 200);
+    assert.equal(ownRead.json.report.contractId, 'OTHER-CONTRACT');
+    assert.equal(ownRead.json.report.kpis.length, 6);
+    assert.equal((await call('GET', '/api/report?reportId=OTHER-2026-08', undefined, 'demo-engineer')).status, 403);
+    assert.equal((await call('GET', '/api/report?reportId=DEMO-2026-Q3', undefined, 'demo-other-contract')).status, 403);
+    assert.equal((await call('GET', '/api/report?reportId=NOPE', undefined, 'demo-admin')).status, 404);
+
+    // Transitions are per package: submitting the quarterly package leaves the monthly one in draft.
+    const submitted = await call('POST', '/api/report/transition', { reportId: 'DEMO-2026-Q3', type: 'submit_for_review' }, 'demo-engineer');
+    assert.equal(submitted.status, 200, JSON.stringify(submitted.json));
+    assert.equal(submitted.json.report.reportId, 'DEMO-2026-Q3');
+    assert.equal(submitted.json.report.status, 'under_review');
+    assert.equal((await call('GET', '/api/report', undefined, 'demo-engineer')).json.report.status, 'draft');
+    assert.equal((await call('GET', '/api/report?reportId=DEMO-2026-Q3', undefined, 'demo-engineer')).json.report.status, 'under_review');
+    assert.equal((await call('POST', '/api/report/transition', { reportId: 'OTHER-2026-08', type: 'submit_for_review' }, 'demo-engineer')).status, 403);
+    const otherSubmit = await call('POST', '/api/report/transition', { reportId: 'OTHER-2026-08', type: 'submit_for_review' }, 'demo-other-contract');
+    assert.equal(otherSubmit.status, 200, JSON.stringify(otherSubmit.json));
+
+    // Control Tower by report or by contract, scope enforced the same way.
+    const quarterly = await call('GET', '/api/control-tower?reportId=DEMO-2026-Q3', undefined, 'demo-engineer');
+    assert.equal(quarterly.status, 200);
+    assert.equal(quarterly.json.report.reportId, 'DEMO-2026-Q3');
+    assert.equal(quarterly.json.report.status, 'under_review');
+    assert.equal(quarterly.json.report.periodStart, '2026-07-01T00:00:00Z');
+    const byContract = await call('GET', '/api/control-tower?contractId=OTHER-CONTRACT', undefined, 'demo-other-contract');
+    assert.equal(byContract.status, 200);
+    assert.equal(byContract.json.report.reportId, 'OTHER-2026-08');
+    assert.equal(byContract.json.freshness.records, 3);
+    assert.equal((await call('GET', '/api/control-tower?contractId=OTHER-CONTRACT', undefined, 'demo-engineer')).status, 403);
+    assert.equal((await call('GET', '/api/control-tower?contractId=UNKNOWN', undefined, 'demo-admin')).status, 404);
+    const defaultTower = await call('GET', '/api/control-tower', undefined, 'demo-engineer');
+    assert.equal(defaultTower.json.report.reportId, 'DEMO-2026-08');
+
+    // Agent runs honour the same boundary through task context.
+    const otherRun = await call('POST', '/api/agent/run', { capability: 'maintenance-kpi', goal: 'x', riskClass: 'operational', actionMode: 'analyse', context: { contractId: 'OTHER-CONTRACT' } }, 'demo-other-contract');
+    assert.equal(otherRun.status, 200, JSON.stringify(otherRun.json));
+    assert.equal(otherRun.json.output.value.contractId, 'OTHER-CONTRACT');
+    assert.equal(otherRun.json.output.value.workOrderCount, 3);
+    assert.equal((await call('POST', '/api/agent/run', { capability: 'maintenance-kpi', goal: 'x', riskClass: 'operational', actionMode: 'analyse', context: { contractId: 'OTHER-CONTRACT' } }, 'demo-engineer')).status, 403);
+
+    // Reset by report id restores only that package.
+    const reset = await call('POST', '/api/report/reset', { reportId: 'DEMO-2026-Q3' }, 'demo-admin');
+    assert.equal(reset.status, 200);
+    assert.equal(reset.json.report.reportId, 'DEMO-2026-Q3');
+    assert.equal(reset.json.audit.fromState, 'under_review');
+    assert.equal((await call('GET', '/api/report?reportId=OTHER-2026-08', undefined, 'demo-admin')).json.report.status, 'under_review');
+    const audit = await call('GET', '/api/audit', undefined, 'demo-admin');
+    assert.equal(audit.json.chain.valid, true);
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await app.close(); }
+});
+
+test('API serves the GIS view per report within scope and fails closed without a schematic adapter', async () => {
+  const { composeApplication } = await import('../src/app/compose.ts');
+  const { loadConfig } = await import('../src/config.ts');
+  const app = await composeApplication(loadConfig({}), { now: () => '2026-09-09T12:00:00Z' });
+  const handler = createApiHandler(app.api);
+  const bare = createApiHandler({ ...app.api, gis: undefined });
+  const server = createServer(async (req, res) => { if (await ((req.url ?? '').includes('bare=1') ? bare(req, res) : handler(req, res))) return; res.writeHead(404); res.end(); });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const get = async (path: string, token: string) => { const response = await fetch(`${base}${path}`, { headers: { Authorization: `Bearer ${token}` } }); return { status: response.status, json: await response.json() as Record<string, any> }; };
+  try {
+    const view = await get('/api/gis', 'demo-viewer');
+    assert.equal(view.status, 200);
+    assert.equal(view.json.provenance.positionsAreCoordinates, false);
+    assert.equal(view.json.provenance.reportId, 'DEMO-2026-08');
+    assert.equal(view.json.generatedAt, '2026-09-09T12:00:00Z');
+    assert.ok(view.json.nodes.every((n: { status: string }) => ['stable', 'watch', 'critical'].includes(n.status)));
+    const quarterly = await get('/api/gis?reportId=DEMO-2026-Q3', 'demo-engineer');
+    assert.equal(quarterly.json.provenance.reportId, 'DEMO-2026-Q3');
+    assert.equal((await get('/api/gis?reportId=OTHER-2026-08', 'demo-engineer')).status, 403);
+    assert.equal((await get('/api/gis?reportId=NOPE', 'demo-admin')).status, 404);
+    assert.equal((await get('/api/gis?lineId=NOPE', 'demo-admin')).status, 404);
+    assert.equal((await get('/api/gis?bare=1', 'demo-admin')).status, 503, 'no schematic adapter: fail closed');
+    assert.equal((await fetch(`${base}/api/gis`)).status, 401);
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await app.close(); }
+});
+
+test('API evaluates the contract digital twin per report within scope', async () => {
+  const { composeApplication } = await import('../src/app/compose.ts');
+  const { loadConfig } = await import('../src/config.ts');
+  const app = await composeApplication(loadConfig({}), { now: () => '2026-09-12T12:00:00Z' });
+  const handler = createApiHandler(app.api);
+  const server = createServer(async (req, res) => { if (await handler(req, res)) return; res.writeHead(404); res.end(); });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const get = async (path: string, token: string) => { const response = await fetch(`${base}${path}`, { headers: { Authorization: `Bearer ${token}` } }); return { status: response.status, json: await response.json() as Record<string, any> }; };
+  try {
+    const twin = await get('/api/contract-twin', 'demo-viewer');
+    assert.equal(twin.status, 200);
+    assert.equal(twin.json.contractual, false);
+    assert.equal(twin.json.period.reportId, 'DEMO-2026-08');
+    assert.equal(twin.json.evaluatedAt, '2026-09-12T12:00:00Z');
+    assert.equal(twin.json.reportingDuties.find((d: { dutyId: string }) => d.dutyId === 'DUTY-MONTHLY').status, 'overdue', 'the monthly package is still draft two days after its demo due date');
+    assert.ok(twin.json.obligations.every((o: { status: string }) => ['met', 'breached', 'not_decision_grade', 'unavailable', 'not_effective', 'not_evaluated'].includes(o.status)));
+    const quarterly = await get('/api/contract-twin?reportId=DEMO-2026-Q3', 'demo-engineer');
+    assert.equal(quarterly.json.period.cadence, 'quarterly');
+    assert.equal(quarterly.json.reportingDuties.find((d: { dutyId: string }) => d.dutyId === 'DUTY-QUARTERLY').reportId, 'DEMO-2026-Q3');
+    assert.equal((await get('/api/contract-twin?reportId=OTHER-2026-08', 'demo-other-contract')).status, 404, 'no twin is published for the second demo contract');
+    assert.equal((await get('/api/contract-twin?reportId=OTHER-2026-08', 'demo-engineer')).status, 403);
+    assert.equal((await fetch(`${base}/api/contract-twin`)).status, 401);
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await app.close(); }
+});
+
+test('API review workflow: comment sheet, disagreement positions, named resolution, and approval held while a disagreement is open', async () => {
+  const { composeApplication } = await import('../src/app/compose.ts');
+  const { loadConfig } = await import('../src/config.ts');
+  const app = await composeApplication(loadConfig({}), { now: () => '2026-09-09T12:00:00Z' });
+  const handler = createApiHandler(app.api);
+  const server = createServer(async (req, res) => { if (await handler(req, res)) return; res.writeHead(404); res.end(); });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const call = async (method: string, path: string, body: unknown, token: string) => { const response = await fetch(`${base}${path}`, { method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: body === undefined ? undefined : JSON.stringify(body) }); return { status: response.status, json: await response.json() as Record<string, any> }; };
+  try {
+    // Comment sheet: the owner asks, the contractor answers, the sheet is scoped to the package's contract.
+    const comment = await call('POST', '/api/review/comment', { subject: { type: 'kpi', id: 'mttr' }, text: 'Confirm the repair clock for WO-1003.' }, 'demo-contract');
+    assert.equal(comment.status, 200, JSON.stringify(comment.json));
+    assert.equal(comment.json.record.actor.party, 'owner');
+    assert.equal(comment.json.record.commentId, 'CMT-DEMO-2026-08-001');
+    assert.equal((await call('POST', '/api/review/comment', { subject: { type: 'kpi', id: 'mttr' }, text: 'x' }, 'demo-viewer')).status, 403);
+    assert.equal((await call('POST', '/api/review/comment', { subject: { type: 'kpi', id: 'mttr' }, text: 'x' }, 'demo-other-contract')).status, 403);
+    assert.equal((await call('POST', '/api/review/comment', { subject: { type: 'kpi', id: 'mttr' }, text: 'x' }, 'demo-admin')).status, 400, 'an administrator must declare the party');
+    assert.equal((await call('POST', '/api/review/comment', { subject: { type: 'nope', id: 'x' }, text: 'x' }, 'demo-engineer')).status, 400);
+    const responded = await call('POST', '/api/review/comment/transition', { commentId: 'CMT-DEMO-2026-08-001', type: 'respond', text: 'Clock starts at the Maximo reported time.' }, 'demo-engineer');
+    assert.equal(responded.json.record.status, 'responded');
+    assert.equal(responded.json.record.responses[0].actor.party, 'contractor');
+
+    // Disagreement raised by the contractor with evidence; the package can be submitted but not approved while it is open.
+    const raised = await call('POST', '/api/review/disagreement', { subject: { type: 'kpi', id: 'mttr' }, summary: 'MTTR includes an owner-caused access delay.', text: 'WO-1004 waited for track access.', evidence: [{ sourceSystem: 'maximo', entityType: 'work-order', entityId: 'WO-1004', observedAt: '2026-08-25T06:00:00Z' }] }, 'demo-engineer');
+    assert.equal(raised.status, 200, JSON.stringify(raised.json));
+    const id = raised.json.record.disagreementId as string;
+    assert.equal(id, 'DSG-DEMO-2026-08-001');
+    assert.equal(raised.json.record.status, 'raised');
+    assert.ok(raised.json.record.ledgerId, 'raising writes a ledger record');
+    assert.equal((await call('POST', '/api/review/disagreement', { subject: { type: 'kpi', id: 'mttr' }, summary: 's', text: 't', evidence: [{ sourceSystem: 'facebook', entityType: 'x', entityId: 'y', observedAt: '2026-08-25T06:00:00Z' }] }, 'demo-engineer')).status, 400);
+    const review = await call('GET', '/api/review', undefined, 'demo-viewer');
+    assert.equal(review.json.comments.length, 1);
+    assert.equal(review.json.disagreements.length, 1);
+    assert.equal(review.json.approvalBlockers.length, 1);
+    const report = await call('GET', '/api/report', undefined, 'demo-viewer');
+    assert.ok(report.json.readiness.blockers.some((b: string) => b.includes(id)));
+
+    assert.equal((await call('POST', '/api/report/transition', { type: 'submit_for_review' }, 'demo-engineer')).status, 200);
+    const held = await call('POST', '/api/report/transition', { type: 'approve', note: 'Reviewed.' }, 'demo-approver');
+    assert.equal(held.status, 409);
+    assert.ok(held.json.blockers[0].includes(id));
+    assert.equal((await call('GET', '/api/report', undefined, 'demo-viewer')).json.report.status, 'under_review', 'the refused approval did not move the package');
+
+    // Resolution needs both positions and the review.resolve permission; a contractor cannot resolve.
+    const tooEarly = await call('POST', '/api/review/disagreement/transition', { disagreementId: id, type: 'resolve', outcome: 'agreed_compromise', text: 'x' }, 'demo-approver');
+    assert.equal(tooEarly.status, 409);
+    assert.equal((await call('POST', '/api/review/disagreement/transition', { disagreementId: id, type: 'resolve', outcome: 'agreed_compromise', text: 'x' }, 'demo-engineer')).status, 403);
+    const ownerPosition = await call('POST', '/api/review/disagreement/transition', { disagreementId: id, type: 'record_position', text: 'Access was granted inside the contractual window.' }, 'demo-reliability');
+    assert.equal(ownerPosition.status, 200, JSON.stringify(ownerPosition.json));
+    assert.equal(ownerPosition.json.record.status, 'positions_recorded');
+    const resolved = await call('POST', '/api/review/disagreement/transition', { disagreementId: id, type: 'resolve', outcome: 'agreed_compromise', text: 'Exclude 90 minutes of access delay; the remainder stands.' }, 'demo-approver');
+    assert.equal(resolved.status, 200, JSON.stringify(resolved.json));
+    assert.equal(resolved.json.record.status, 'resolved');
+    assert.equal(resolved.json.record.resolution.actor.principalId, 'demo.approver');
+
+    const approved = await call('POST', '/api/report/transition', { type: 'approve', note: 'Reviewed after resolution.' }, 'demo-approver');
+    assert.equal(approved.status, 200, JSON.stringify(approved.json));
+    assert.equal(approved.json.report.status, 'approved');
+
+    const ledger = await call('GET', `/api/ledger?subjectType=disagreement&subjectId=${id}`, undefined, 'demo-admin');
+    assert.deepEqual(ledger.json.records.map((r: { kind: string }) => r.kind), ['disagreement', 'resolution']);
+    assert.equal(ledger.json.records[1].follows, ledger.json.records[0].ledgerId);
+    const audit = await call('GET', '/api/audit', undefined, 'demo-admin');
+    assert.equal(audit.json.chain.valid, true);
+    const actions = audit.json.events.map((e: { action: string }) => e.action);
+    for (const expected of ['review.comment_created', 'review.comment_responded', 'disagreement.raised', 'report.transition_refused', 'disagreement.transition_refused', 'disagreement.position_recorded', 'disagreement.resolved', 'report.approved']) assert.ok(actions.includes(expected), expected);
+    assert.equal((await call('GET', '/api/review?reportId=OTHER-2026-08', undefined, 'demo-engineer')).status, 403);
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await app.close(); }
+});
+
+test('API knowledge retrieval lists and searches within the deployment classification and contract scope', async () => {
+  const { composeApplication } = await import('../src/app/compose.ts');
+  const { loadConfig } = await import('../src/config.ts');
+  const app = await composeApplication(loadConfig({}), { now: () => '2026-09-09T12:00:00Z' });
+  const handler = createApiHandler(app.api);
+  const server = createServer(async (req, res) => { if (await handler(req, res)) return; res.writeHead(404); res.end(); });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const get = async (path: string, token: string) => { const response = await fetch(`${base}${path}`, { headers: { Authorization: `Bearer ${token}` } }); return { status: response.status, json: await response.json() as Record<string, any> }; };
+  try {
+    const list = await get('/api/knowledge', 'demo-viewer');
+    assert.equal(list.status, 200);
+    assert.equal(list.json.classification, 'synthetic');
+    assert.deepEqual(list.json.documents.map((d: { documentId: string }) => d.documentId), ['KB-DEMO-CONTRACT-NOTES', 'KB-DEMO-KPI-GUIDE', 'KB-DEMO-REVIEW-PROCEDURE']);
+    const hits = await get('/api/knowledge?query=MTTR%20repair%20clock&limit=2', 'demo-viewer');
+    assert.equal(hits.json.hits.length, 2);
+    assert.equal(hits.json.hits[0].evidence.entityId, 'KB-DEMO-KPI-GUIDE/P1');
+    const scoped = await get('/api/knowledge?query=clause%2012.2&contractId=DEMO-CONTRACT', 'demo-engineer');
+    assert.equal(scoped.json.hits[0].documentId, 'KB-DEMO-CONTRACT-NOTES');
+    assert.equal((await get('/api/knowledge?query=clause&contractId=DEMO-CONTRACT', 'demo-other-contract')).status, 403);
+    assert.equal((await get('/api/knowledge?query=x&limit=99', 'demo-viewer')).status, 400);
+    assert.equal((await fetch(`${base}/api/knowledge`)).status, 401);
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await app.close(); }
 });

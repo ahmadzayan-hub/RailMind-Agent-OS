@@ -1,7 +1,9 @@
 import type { CapabilityHandler, CapabilityResult } from '../agent-os/handlers.ts';
-import type { ContractReadInput, MemoryReadInput } from '../agent-os/standard-tools.ts';
+import type { ContractReadInput, KnowledgeReadInput, MemoryReadInput } from '../agent-os/standard-tools.ts';
+import type { KnowledgeHit } from '../knowledge/contracts.ts';
 import type { ContractKpiSet } from '../connectors/contract/port.ts';
 import type { MemoryRecord } from '../agent-os/memory.ts';
+import { ModelUnavailableError } from '../agent-os/model-guard.ts';
 import { draftGroundedReportNarrative } from '../llm/report-narrative.ts';
 import type { ReportCadence, ReportException, ReportPackage } from '../reporting/contracts.ts';
 import { buildReportPackage, deterministicExecutiveSummary } from '../reporting/generator.ts';
@@ -13,10 +15,25 @@ import { resolveScope, type AnalysisScope } from './scope.ts';
  * drafts narrative with the model only when the runtime granted one. The
  * narrative never introduces numbers that are not in the package.
  */
+export interface ReportingCitation {
+  ref: string;
+  title: string;
+  section: string | null;
+  classification: KnowledgeHit['classification'];
+}
+
 export interface ReportingValue {
   report: ReportPackage;
   narrative: string;
-  narrativeSource: 'model' | 'deterministic';
+  narrativeSource: 'model' | 'deterministic' | 'deterministic_fallback';
+  /** Reference passages retrieved for the narrative (context for wording, never a fact source). */
+  citations: readonly ReportingCitation[];
+}
+
+/** Query built from the package: the contract, the breached KPIs and the exception titles. */
+export function knowledgeQueryFor(report: ReportPackage): string {
+  const breached = report.kpis.filter((k) => k.status === 'breach').map((k) => `${k.definition.id} ${k.definition.name}`);
+  return [report.contractId, ...breached, ...report.exceptions.map((x) => x.title)].join(' ');
 }
 
 function reportIdFor(cadence: ReportCadence, scope: AnalysisScope): string {
@@ -39,20 +56,33 @@ export function createReportingHandler(cadence: ReportCadence, defaults: Analysi
         priorBreachesByKpi: pack.scope.priorBreachesByKpi,
       });
       const priorDecisions = await context.tools.call<MemoryReadInput, readonly MemoryRecord[]>('memory.read', { kind: 'decision' });
+      const passages: readonly KnowledgeHit[] = context.model && context.tools.available('knowledge.read')
+        ? await context.tools.call<KnowledgeReadInput, readonly KnowledgeHit[]>('knowledge.read', { query: knowledgeQueryFor(report), contractId: pack.scope.contractId, limit: 4 })
+        : [];
       let narrative = deterministicExecutiveSummary(report);
       let narrativeSource: ReportingValue['narrativeSource'] = 'deterministic';
       let modelUsed = false;
+      let modelFailure: string | null = null;
       if (context.model) {
-        narrative = await draftGroundedReportNarrative(report, context.model);
-        narrativeSource = 'model';
-        modelUsed = true;
+        try {
+          narrative = await draftGroundedReportNarrative(report, context.model, passages);
+          narrativeSource = 'model';
+          modelUsed = true;
+        } catch (error) {
+          if (!(error instanceof ModelUnavailableError)) throw error;
+          modelFailure = error.message;
+          narrativeSource = 'deterministic_fallback';
+        }
       }
       return {
-        value: { report: { ...report, narrativeDraft: narrative }, narrative, narrativeSource },
-        evidence: pack.evidence,
+        value: { report: { ...report, narrativeDraft: narrative }, narrative, narrativeSource, citations: passages.map((p) => ({ ref: `${p.documentId}/${p.passageId}`, title: p.title, section: p.section, classification: p.classification })) },
+        evidence: [...pack.evidence, ...passages.map((p) => p.evidence)],
         assumptions: [
-          narrativeSource === 'model' ? 'Narrative drafted by a model from the package facts only; interpretation is labelled as such and requires review.' : 'No model was granted; narrative is the deterministic executive summary.',
+          narrativeSource === 'model' ? 'Narrative drafted by a model from the package facts only; interpretation is labelled as such and requires review.'
+            : narrativeSource === 'deterministic_fallback' ? `Model unavailable (${modelFailure}); narrative is the deterministic executive summary. Facts are unaffected.`
+            : 'No model was granted; narrative is the deterministic executive summary.',
           `${priorDecisions.length} prior decision record(s) were available in memory for context.`,
+          ...(passages.length > 0 ? [`${passages.length} reference passage(s) were supplied to the model for wording only (${passages.map((p) => `${p.documentId}/${p.passageId}`).join(', ')}); no number, threshold or date comes from them.`] : []),
         ],
         modelUsed,
       };

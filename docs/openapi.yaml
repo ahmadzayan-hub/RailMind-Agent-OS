@@ -1,11 +1,13 @@
 openapi: 3.1.0
 info:
   title: RailMind Agent OS decision API
-  version: 0.5.0
+  version: 0.6.0
   description: >-
     Local decision API for the P0 synthetic demo. Mutates RailMind-owned state only
-    (report status, audit trail, agent memory). Never writes to Maximo, finance or
-    contract systems. All routes except /api/health and /api/auth/demo-identities require
+    (report status, review sheet, disagreements, audit trail, ledger, agent memory).
+    Never writes to Maximo, finance or contract systems. Report routes address a
+    registered package by reportId (default: the deployment's default package) and
+    are scope-checked against that package's contract. All routes except /api/health and /api/auth/demo-identities require
     a bearer token; the audit actor is the authenticated principal.
 servers:
   - url: http://localhost:4173
@@ -36,15 +38,26 @@ paths:
       responses:
         '200': { description: Principal }
         '401': { description: Missing or invalid token }
+  /api/reports:
+    get:
+      summary: Registered report packages within the principal's scope, with status and readiness
+      responses:
+        '200': { description: Packages and contract ids }
   /api/report:
     get:
-      summary: Current report package, readiness and its audit trail
+      summary: A report package, readiness (including open-disagreement blockers), evidence version, audit trail and ledger
+      parameters:
+        - { in: query, name: reportId, schema: { type: string }, description: Registered package id; default package when omitted }
       responses:
         '200': { description: Report view }
+        '403': { description: Outside the principal's scope }
+        '404': { description: Unregistered report id }
   /api/control-tower:
     get:
       summary: Control Tower DTO through providers, readiness gate, KPI engine and exception engine
       parameters:
+        - { in: query, name: reportId, schema: { type: string }, description: Package to build; takes precedence over contractId }
+        - { in: query, name: contractId, schema: { type: string }, description: First registered package of the contract }
         - in: query
           name: asOf
           schema: { type: string, format: date-time }
@@ -52,6 +65,131 @@ paths:
       responses:
         '200': { description: DTO }
         '403': { description: Outside the principal's scope }
+        '404': { description: No package registered for the contract }
+  /api/gis:
+    get:
+      summary: GIS view; the schematic joined with Control Tower facts (positions are canvas percentages, never coordinates)
+      parameters:
+        - { in: query, name: reportId, schema: { type: string } }
+        - { in: query, name: lineId, schema: { type: string } }
+      responses:
+        '200': { description: GIS view with a status and evidence per node }
+        '404': { description: Unknown line }
+        '503': { description: No schematic adapter configured (production) }
+  /api/contract-twin:
+    get:
+      summary: Contract digital twin evaluated against the package's facts (KPI obligations on decision-grade data, reporting duties on package status)
+      parameters:
+        - { in: query, name: reportId, schema: { type: string } }
+      responses:
+        '200': { description: Twin view }
+        '404': { description: The repository publishes no twin for the contract }
+        '503': { description: No contract repository port }
+  /api/review:
+    get:
+      summary: Review comment sheet, disagreements and the approval blockers they raise for a package
+      parameters:
+        - { in: query, name: reportId, schema: { type: string } }
+      responses:
+        '200': { description: Comments and disagreements }
+  /api/review/comment:
+    post:
+      summary: Add a review comment as the principal's party (review.comment)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subject, text]
+              properties:
+                reportId: { type: string }
+                subject: { type: object, properties: { type: { type: string, enum: [kpi, exception, obligation, narrative, package] }, id: { type: string } } }
+                text: { type: string }
+                party: { type: string, enum: [owner, contractor], description: Required only for principals without a declared party }
+      responses:
+        '200': { description: Comment created and audited }
+        '400': { description: Missing subject, text or party }
+        '409': { description: Refused; blockers returned and refusal audited }
+  /api/review/comment/transition:
+    post:
+      summary: Respond to or close a comment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [commentId, type]
+              properties:
+                commentId: { type: string }
+                type: { type: string, enum: [respond, close] }
+                text: { type: string }
+                party: { type: string, enum: [owner, contractor] }
+      responses:
+        '200': { description: Applied and audited }
+        '404': { description: Unknown comment }
+        '409': { description: Refused (closed comment, unanswered comment closed by the other party) }
+  /api/review/disagreement:
+    post:
+      summary: Raise a disagreement with the raising party's position and evidence; writes a ledger record
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subject, summary, text]
+              properties:
+                reportId: { type: string }
+                subject: { type: object }
+                summary: { type: string }
+                text: { type: string, description: The raising party's position }
+                evidence: { type: array, items: { type: object, properties: { sourceSystem: { type: string }, entityType: { type: string }, entityId: { type: string }, observedAt: { type: string, format: date-time } } } }
+                party: { type: string, enum: [owner, contractor] }
+      responses:
+        '200': { description: Raised; the package cannot be approved or locked until resolved or escalated }
+        '409': { description: Refused }
+  /api/review/disagreement/transition:
+    post:
+      summary: Record the other party's position (review.comment), resolve with a named outcome or escalate (review.resolve)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [disagreementId, type]
+              properties:
+                disagreementId: { type: string }
+                type: { type: string, enum: [record_position, resolve, escalate] }
+                text: { type: string }
+                outcome: { type: string, enum: [owner_position_upheld, contractor_position_upheld, agreed_compromise] }
+                evidence: { type: array, items: { type: object } }
+                party: { type: string, enum: [owner, contractor] }
+      responses:
+        '200': { description: Applied, audited and (for resolve and escalate) ledgered with lineage to the raise record }
+        '403': { description: Missing permission or outside scope }
+        '409': { description: Refused (positions incomplete, terminal state, unnamed decision) }
+  /api/knowledge:
+    get:
+      summary: Private knowledge documents (no query) or deterministic passage retrieval within the deployment classification
+      parameters:
+        - { in: query, name: query, schema: { type: string, maxLength: 500 } }
+        - { in: query, name: contractId, schema: { type: string }, description: Scope-checked; contract-bound documents of other contracts are hidden }
+        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 20 } }
+      responses:
+        '200': { description: Documents or ranked hits, each with an evidence reference }
+        '503': { description: No knowledge store configured }
+  /api/portfolio:
+    get:
+      summary: Synthetic portfolio DTO with governed forecast and funding-gap exceptions
+      parameters:
+        - { in: query, name: asOf, schema: { type: string, format: date } }
+        - { in: query, name: horizon, schema: { type: string, format: date } }
+      responses:
+        '200': { description: Portfolio DTO }
+        '403': { description: Outside the principal's portfolio scope }
   /api/ledger:
     get:
       summary: Decision ledger records
@@ -79,15 +217,20 @@ paths:
               type: object
               required: [type]
               properties:
+                reportId: { type: string, description: Registered package; default package when omitted }
                 type: { type: string, enum: [submit_for_review, approve, reject, lock, supersede, revise] }
                 note: { type: string, description: Required to approve with a critical exception, to reject, and recorded as the supersession reason }
                 at: { type: string, format: date-time }
       responses:
         '200': { description: Transition applied and audited }
-        '409': { description: Transition refused; blockers returned and refusal audited }
+        '409': { description: Transition refused (state machine blockers, or approve/lock while a disagreement is open); blockers returned and refusal audited }
   /api/report/reset:
     post:
-      summary: Restore the demo package (audited)
+      summary: Restore a package to its seed (audited)
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { reportId: { type: string } } }
       responses:
         '200': { description: Restored }
   /api/agent/task:
@@ -118,9 +261,25 @@ paths:
         '200': { description: Completed run record with grounded output }
         '403': { description: Blocked by routing or policy }
         '422': { description: Run failed (tool boundary, missing evidence, handler error) }
+  /api/agent/sequence:
+    post:
+      summary: Execute a caller-declared chain of governed runs (1 to 8 tasks); every task is permission-checked before any run starts; the chain stops at the first run that does not complete
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tasks]
+              properties:
+                tasks: { type: array, minItems: 1, maxItems: 8, items: { type: object } }
+      responses:
+        '200': { description: Sequence completed; runs linked in the ledger }
+        '403': { description: A task is not permitted or outside scope }
+        '422': { description: Sequence stopped; stoppedAt names the step }
   /api/runs:
     get:
-      summary: Run records of this process
+      summary: Governed run records (persisted in PostgreSQL when configured; in memory otherwise) and the persistence mode
       responses:
         '200': { description: Runs }
   /api/audit:

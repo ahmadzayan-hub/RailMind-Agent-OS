@@ -27,8 +27,8 @@ Current stage: **P0 synthetic demo**. Nothing here is connected to live RTA, Max
 
 ```
 src/
-  agent-os/        contracts, policy (execution rules + release readiness), catalog (7 agents with capability minimum risk), kernel (routing + risk escalation), orchestrator (runtime), tools (registry + plan-scoped invoker), standard-tools (ports -> tool ids), handlers (capability contract), memory
-  agents/          executable capability handlers: data-quality, maintenance-kpi + exception-analysis, reporting (monthly/quarterly/annual) + executive-briefing, asset-intelligence (asset-health, failure-risk, maintenance-priority), scope resolution
+  agent-os/        contracts, policy (execution rules + release readiness), catalog (7 agents with capability minimum risk), kernel (routing + risk escalation), orchestrator (runtime: guarded model, bounded retries, runSequence), run-store, model-guard, tools (registry + plan-scoped invoker with retries), standard-tools (ports -> tool ids incl. knowledge.read), handlers (capability contract), memory
+  agents/          executable capability handlers: data-quality, maintenance-kpi + exception-analysis, reporting (monthly/quarterly/annual, cites knowledge passages) + executive-briefing, asset-intelligence (asset-health, failure-risk, maintenance-priority), contract-context (definition set + twin + clause references), finance-context, scope resolution
   asset-intelligence/ migrated legacy RailMind engine: risk (health band, score, drivers, confidence, recommendation), proposal (engineer-review gate), sample network, types
   auth/            principals, seven roles, capability-group permissions, scopes; hashed bearer-token directory (demo identities only without RAILMIND_USERS)
   app/compose.ts   composition root: providers by mode (production refuses synthetic), ports, adapters, runtime, ledger, API dependencies
@@ -40,30 +40,35 @@ src/
   config.ts        typed environment configuration (.env.example documents every variable)
   api/router.ts    local decision API (report transitions, reset, audited agent planning, audit trail); runtime-neutral, hosted by server.mjs
   audit/           append-only, SHA-256 hash-chained audit log (in-memory adapter)
-  persistence/     SQL ports, PostgreSQL adapters (audit, memory, report store), lazy `pg` loader
+  persistence/     SQL ports, PostgreSQL adapters (audit, memory, report store, ledger, runs, review, knowledge), lazy `pg` loader
   connectors/maximo/ port (anti-corruption interfaces), client (read-only REST adapter), mock (in-memory port)
-  connectors/contract/ contract context port (approved KPI definition sets); in-memory adapter serving the demo set
-  connectors/condition/ condition-monitoring port (health index, trend, signals); in-memory demo profiles
+  connectors/contract/ contract port (approved KPI definition sets + digital twin); in-memory adapter; repository.ts parses the JSON export (sets and twins, validated)
+  connectors/condition/ condition-monitoring port (health index, trend, signals); in-memory demo profiles; client.ts read-only REST adapter
+  contract-twin/   twin contract (obligations, reporting duties, evidence rules) + evaluation against Control Tower facts
+  review/          comment sheet and disagreement state machine (pure transitions with audit events), review store
+  knowledge/       private knowledge documents with classification, deterministic lexical retrieval, in-memory store, demo corpus
+  gis/             bounded GIS domain: schematic contracts + read port, demo schematic, service joining nodes with Control Tower facts
   data/canonical.ts  canonical decision projections (asset, work order, invoice, contract, snapshot)
   kpi/             engine, governed path (gate + engine), authority registry (versioned governed definitions), demo definitions (demo_only)
   exceptions/      exception severity from KPI observations (breach + prior breaches -> critical)
-  reporting/       contracts, generator, approval (six-state machine, evidence-bound), evidence-version, store
+  reporting/       contracts, generator, approval (six-state machine, evidence-bound), evidence-version, store, registry (registered packages per contract)
   llm/             OpenAI-compatible gateway (fetch only), grounded report-narrative prompt, model invocation policy (classification x endpoint locality)
-  forecast/        deterministic P25/P50/P75 schedule-adjusted expenditure pace model
+  forecast/        pace-quantile-v2: calibration with exclusions, confidence labels, funding gap, backtest, drift monitor
+  portfolio/       portfolio domain: classification, seeded synthetic provider, service (cells, forecast, gap exceptions)
   control-tower/   view model counts for the Control Tower
-  web/demo-pack.ts projects engine outputs into the browser data pack (generated file: web/data/demo-pack.js)
-  demo.ts          synthetic August 2026 work orders, KPI observations and report package
+  web/demo-pack.ts projects engine outputs into the browser data pack (generated file: web/data/demo-pack.js); gis-pack.ts and contract-twin-pack.ts generate web/data/gis-pack.js and web/data/contract-twin-pack.js the same way
+  demo.ts          synthetic August 2026 work orders, KPI observations, report packages (monthly, quarterly, second contract), demo twin, dataset and registrations
   index.ts         public export surface (all modules)
 web/
   app.js           bilingual (Arabic RTL first, English toggle) Control Tower UI; reads every number from web/data/demo-pack.js
-  data/demo-pack.js GENERATED by `npm run build:web-data`; never edit by hand; `check:web-data` blocks drift
+  data/demo-pack.js, gis-pack.js, contract-twin-pack.js GENERATED by `npm run build:web-data`; never edit by hand; `check:web-data` blocks drift
   styles.css       single-file design system
-  portfolio.html   self-contained sanitised portfolio dashboard, embedded in an iframe
+  portfolio.html + portfolio.js   portfolio workspace (module), renders /api/portfolio or web/data/portfolio-pack.js (GENERATED, synthetic)
 index.html         application shell
 server.mjs         host: loads config, composes the application, serves static files + API with structured logs and graceful shutdown
 Dockerfile, infra/docker-compose.yml, .env.example, .github/workflows/ci.yml   runtime and CI infrastructure
 infra/sql/         schema for RailMind-owned tables (audit rows append-only by trigger)
-tests/             node:test suites (109 tests; the live PostgreSQL test is skipped unless DATABASE_URL is set)
+tests/             node:test suites (158 tests; the live PostgreSQL test is skipped unless DATABASE_URL is set)
 scripts/           build-web-data.mjs, check-web-data.mjs, check-portfolio.mjs, package-smoke.mjs
 docs/              product authority, architecture, data contract, pilot plan, status, reviews, deployment
 infra/             optional PostgreSQL + pgvector compose file
@@ -80,7 +85,7 @@ npm run build           # emit dist/ (ESM + declarations)
 npm run serve           # http://localhost:4173  (Replit uses PORT=5000); DATABASE_URL=... enables PostgreSQL
 ```
 
-Run `npm run verify` before every commit. All tests must pass. If you change `src/demo.ts`, the KPI engine, exceptions, reporting or approval logic, run `npm run build:web-data` and commit the regenerated pack.
+Run `npm run verify` before every commit. All tests must pass. If you change `src/demo.ts`, the KPI engine, exceptions, reporting, approval logic, the GIS schematic or the twin evaluation, run `npm run build:web-data` and commit the regenerated packs.
 
 ## Coding conventions
 
@@ -108,21 +113,37 @@ Run `npm run verify` before every commit. All tests must pass. If you change `sr
 - Approvals are bound to an evidence version. Changed evidence supersedes the approval automatically.
 - Every completed run and every report transition writes to the append-only ledger. Never mutate ledger or audit rows.
 - The static host serves only the allowlist in `src/http/public-paths.ts`. Adding a public file means adding it there and covering it in `tests/http-security.test.ts`.
+- The public repository carries synthetic portfolio values only. Never reintroduce organisational totals; `scripts/check-portfolio.mjs` blocks the retired fingerprints.
 
-## Known gaps (as of 2026-09-09, after Phases 0 to 8)
+## Governance rules added on 2026-09-20 (keep them)
 
-- Authentication is a hashed-token directory, not enterprise SSO. `DATA_CLASSIFICATION` is a deployment setting, not per-record classification.
-- Production mode cannot start: contract-repository and condition-monitoring adapters do not exist yet (fail closed by design).
-- Forecast calibration includes completed initiatives (recorded defect); the portfolio workspace still embeds snapshot cells. Phases 9 and 10 are pending.
-- Contract digital twin, RMD workflows, owner/contractor disagreement layer and private knowledge runtime (Phases 12 to 15) are not started, by agreement pending independent review.
-- Two catalog capabilities have no handler yet: contract-context, finance-context.
-- Asset-intelligence weights and thresholds are the legacy demo values, uncalibrated; the condition port serves synthetic profiles.
-- Run records live in process memory (`/api/runs`); only their audit events and decision memory are persisted.
-- The runtime is single-step: one handler per run, no model planning, no retries, no scheduling.
-- Only one report package (the demo seed) is served. Multi-report and multi-contract scoping is not built.
-- The KPI values in the preview still come from the generated pack, not from the API. Only report status, readiness and audit are live.
-- PM compliance KPI, data-quality service, contract-context port and finance-context port are documented but not implemented.
-- GIS positions, station names and routing defaults (owner, due window) in `web/app.js` are presentation placeholders, not engine outputs. They are labelled as such in the code.
+- Every report route addresses a registered package (`src/reporting/registry.ts`) and is scope-checked against that package's contract. An unregistered report id is refused.
+- GIS owns positions and lines only. Node statuses come from the GIS service joining Control Tower facts; positions are canvas percentages and are labelled as never being coordinates. Production has no schematic adapter and `/api/gis` fails closed.
+- The contract twin is read from the repository and evaluated, never authored. KPI obligations are judged on decision-grade data only; other obligation kinds are listed as not evaluated. A `demo_only` twin is never contractual and production refuses unapproved twins.
+- Review transitions are pure functions returning their audit event. An open disagreement holds approval and locking of its package; the refusal is audited. Raising and resolving write linked ledger records.
+- Knowledge retrieval is deterministic and classification-gated at read time; a document above the deployment classification is invisible. Passages are context for wording and are cited as evidence; no number, threshold or date may come from them.
+- A model failure never fails a run: handlers fall back to deterministic output and the failure is audited. Transient source errors are retried within a small bound and every retry is audited. Chains are declared by the caller (`runSequence`), never planned by a model.
+
+## Known gaps (as of 2026-09-20, after Phases 0 to 15)
+
+- Authentication is a hashed-token directory, not enterprise SSO. `DATA_CLASSIFICATION` is a deployment setting; per-record classification exists for knowledge documents only.
+- Production mode needs owner-environment inputs that do not exist in this repository: an approved contract repository export (definition sets and twins), Maximo object-structure mappings confirmed against a live tenant, a condition-monitoring endpoint, a GIS schematic adapter (none exists; `/api/gis` answers 503) and a loaded knowledge corpus.
+- The portfolio and forecast are synthetic; a private portfolio provider does not exist yet and public builds refuse non-synthetic classifications.
+- Asset-intelligence weights and thresholds are the legacy demo values, uncalibrated; the condition port serves synthetic profiles in demo mode.
+- The runtime executes one handler per run and caller-declared sequences; there is no model planning or scheduling, by design.
+- Review comments and disagreements are mutable projections (in memory or PostgreSQL); the audit log and ledger remain the record. There is no notification or deadline tracking for open disagreements.
+- Twin evaluation covers KPI obligations and reporting duties only; evidence, response and payment obligations are recorded, not judged.
+- Train markers in the GIS view are a presentation simulation and are flagged `simulated`.
+
+## Resolved on 2026-09-20
+
+- Contract-context and finance-context handlers exist and are tested; the catalog has no handler-less capability.
+- PM compliance KPI is computed by the engine, gated by readiness (`missing_completion`) and shown in the Control Tower.
+- Production composition has adapters for the contract repository and condition monitoring and names every missing input.
+- Run records persist (`railmind_runs`, immutable by trigger). Retries, model fallback and `runSequence` are tested, including the model-unavailable case.
+- Multiple packages and contracts are served and scoped; the preview follows the selected package from the live API (KPIs, exceptions, assets, timeline, GIS, twin, review sheet).
+- GIS positions, station names and marker statuses no longer live in `web/app.js` or `index.html`; they come from `web/data/gis-pack.js` or `/api/gis`.
+- Phases 11 to 15 are implemented on synthetic data as described above.
 
 ## Resolved on 2026-09-09
 
